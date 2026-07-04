@@ -132,14 +132,19 @@ function emptyProfile(family: TemplateFamily, notes: string[]): TemplateProfile 
  *
  * Derivation notes -- with ``C = render([u:U1, a:A1])`` and
  * ``D = render([u:U1, a:A1, u:U2])`` (no generation prompt):
- * - the gap between U1 and A1 in ``C`` is ``userSuffix + assistantPrefix``;
+ * - the gap between U1 and A1 in ``D`` is ``userSuffix + assistantPrefix``.
+ *   Taken from ``D`` (assistant MID-conversation), not ``C``: several
+ *   templates render the LAST assistant turn specially (Qwen3/3.5 inject
+ *   an empty ``<think>`` scaffold), which would contaminate the prefix;
  * - the tail after U2 in ``D`` is ``userSuffix`` (+ any unconditional
  *   trailer some templates always append);
  * - so ``userSuffix = lcp(gap, tail)`` and the remainder of the gap is
- *   ``assistantPrefix``. Symmetrically for the assistant side. Templates
- *   that unconditionally append the assistant header (some Llama-3
- *   variants) yield shifted-but-consistent markers -- the round-trip
- *   self-test is the arbiter of whether they parse correctly.
+ *   ``assistantPrefix``. Symmetrically for the assistant side (the
+ *   assistant SUFFIX is safe to take from ``C`` -- the special-casing
+ *   lives before the content, not after). Templates that unconditionally
+ *   append the assistant header (some Llama-3 variants) yield
+ *   shifted-but-consistent markers -- the round-trip self-test is the
+ *   arbiter of whether they parse correctly.
  */
 function deriveCoreMarkers(
   source: string,
@@ -159,15 +164,18 @@ function deriveCoreMarkers(
     { role: 'assistant', content: A1 },
     { role: 'user', content: U2 }
   ], false);
-  const idxU1 = C.indexOf(U1);
-  const idxA1 = C.indexOf(A1);
+  const idxU1 = D.indexOf(U1);
+  const idxA1 = D.indexOf(A1);
   const idxU2 = D.indexOf(U2);
-  if (idxU1 === -1 || idxA1 === -1 || idxA1 < idxU1 || idxU2 === -1) return null;
+  const idxA1C = C.indexOf(A1);
+  if (idxU1 === -1 || idxA1 === -1 || idxA1 < idxU1 || idxU2 === -1 || idxA1C === -1) {
+    return null;
+  }
 
-  const head = C.slice(0, idxU1);
-  const gapUA = C.slice(idxU1 + U1.length, idxA1);
-  const tailA = C.slice(idxA1 + A1.length);
-  const gapAU = D.slice(D.indexOf(A1) + A1.length, idxU2);
+  const head = D.slice(0, idxU1);
+  const gapUA = D.slice(idxU1 + U1.length, idxA1);
+  const tailA = C.slice(idxA1C + A1.length);
+  const gapAU = D.slice(idxA1 + A1.length, idxU2);
   const tailU = D.slice(idxU2 + U2.length);
 
   const userSuffix = longestCommonPrefix(gapUA, tailU);
@@ -223,7 +231,9 @@ function deriveSystemMarkers(
   return { status: 'ok', markers: { prefix, suffix } };
 }
 
-/** Best-effort tool-result role markers (many templates reject role=tool). */
+/** Best-effort tool-result role markers (many templates reject role=tool).
+ * The trailing user turn keeps the post-tool assistant turn MID-conversation
+ * so last-turn scaffolds (Qwen `<think>`) don't leak into the suffix. */
 function deriveToolMarkers(
   source: string,
   inputs: TemplateInputs,
@@ -235,7 +245,8 @@ function deriveToolMarkers(
       { role: 'user', content: U1 },
       { role: 'assistant', content: A1 },
       { role: 'tool', content: T1 },
-      { role: 'assistant', content: 'dsbxSentinelAsstTwo' }
+      { role: 'assistant', content: 'dsbxSentinelAsstTwo' },
+      { role: 'user', content: U2 }
     ], false);
   } catch {
     return null;

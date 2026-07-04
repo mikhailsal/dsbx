@@ -80,11 +80,14 @@ describe('deriveProfile on real templates', () => {
     expect(profile.roles.system).toBeUndefined();
   });
 
-  it('recovers Qwen3 thinking scaffold in the assistant prefix and tool_response markers', () => {
+  it('keeps the Qwen3 assistant prefix clean of the last-turn <think> scaffold', () => {
     const profile = deriveProfile(inputsOf('qwen3'));
-    expect(profile.roles.assistant?.prefix).toContain('<think>');
+    // Qwen3 injects an empty <think> scaffold only into the LAST assistant
+    // turn; markers are derived mid-conversation so it must not leak in.
+    expect(profile.roles.assistant?.prefix).toBe('<|im_start|>assistant\n');
     expect(profile.reasoning).toEqual({ open: '<think>', close: '</think>' });
     expect(profile.roles.tool?.prefix).toContain('<tool_response>');
+    expect(profile.roles.tool?.suffix).not.toContain('<think>');
   });
 
   it('degrades to raw-only for a null template', () => {
