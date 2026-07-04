@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from dsbx.core.backend import Backend
+from dsbx.core.chat_template import ChatTemplateInfo, none_info
 from dsbx.core.types import Capabilities, StepResult, TokenCandidate
 
 
@@ -34,6 +35,9 @@ class FakeBackend(Backend):
         bos_token_ids: tuple[int, ...] = (),
         supports_prepend_token_ids: bool = True,
         special_tokens: list[tuple[int, str]] | None = None,
+        chat_template: ChatTemplateInfo | None = None,
+        generation_disabled: bool = False,
+        supports_chat_stream: bool = False,
     ) -> None:
         self.tokens = tokens or {}
         self.pieces = pieces or {}
@@ -46,6 +50,9 @@ class FakeBackend(Backend):
         self.bos_token_ids = bos_token_ids
         self.supports_prepend_token_ids_flag = supports_prepend_token_ids
         self._special_tokens = special_tokens or []
+        self._chat_template = chat_template
+        self.generation_disabled = generation_disabled
+        self.supports_chat_stream = supports_chat_stream
         self.closed = False
 
     @property
@@ -59,6 +66,8 @@ class FakeBackend(Backend):
             eos_token_ids=self.eos_token_ids,
             bos_token_ids=self.bos_token_ids,
             supports_prepend_token_ids=self.supports_prepend_token_ids_flag,
+            generation_disabled=self.generation_disabled,
+            supports_chat_stream=self.supports_chat_stream,
         )
 
     def tokenize(self, text: str) -> list[int]:
@@ -74,6 +83,9 @@ class FakeBackend(Backend):
 
     def special_tokens(self) -> list[tuple[int, str]]:
         return list(self._special_tokens)
+
+    def chat_template_info(self) -> ChatTemplateInfo:
+        return self._chat_template or none_info()
 
     def next_distribution(
         self,

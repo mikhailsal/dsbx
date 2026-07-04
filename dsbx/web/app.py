@@ -46,14 +46,17 @@ from dsbx.core.samplers import make_sampler
 from dsbx.core.types import StepResult
 from dsbx.server.schemas import step_to_wire
 from dsbx.web import schemas as S
+from dsbx.web import schemas_chat as SC
 from dsbx.web.auth import AuthConfig, make_require_bearer
 from dsbx.web.backends import MODEL_LIST_TTL_S, BackendRegistry
+from dsbx.web.deps import use_backend as _use_backend
 from dsbx.web.sessions import (
     ManualSessionRegistry,
     load_transcript_into_session,
     transcript_to_dict,
 )
 from dsbx.web.streaming import stream_generate, stream_spec
+from dsbx.web.streaming_chat import chat_stream_response
 
 log = logging.getLogger("dsbx.web.app")
 
@@ -167,6 +170,11 @@ def make_web_app(
         from dsbx.web.logs_api import make_logs_router
 
         app.include_router(make_logs_router(require_bearer))
+
+    # Chat-mode endpoints (template discovery today; see chat_api docstring).
+    from dsbx.web.chat_api import make_chat_router
+
+    app.include_router(make_chat_router(registry, require_bearer))
 
     # --------------------------------------------------------------- health
     @app.get("/api/v1/health", response_model=S.HealthResponse, tags=["meta"])
@@ -392,7 +400,7 @@ def make_web_app(
         tags=["generate"],
         dependencies=[Depends(require_bearer)],
     )
-    def generate_stream(req: S.GenerateRequest) -> StreamingResponse:
+    def generate_stream(req: SC.ChatGenerateRequest) -> StreamingResponse:
         sampler_spec = req.sampler
         if sampler_spec.name == "custom":
             raise HTTPException(
@@ -409,6 +417,13 @@ def make_web_app(
             raise HTTPException(status_code=400, detail=f"unknown sampler: {exc}") from exc
         except TypeError as exc:
             raise HTTPException(status_code=400, detail=f"bad sampler params: {exc}") from exc
+
+        # Chat-simulation path: structured messages[] against a chat-only
+        # provider's /chat/completions. All guards + streaming live in
+        # streaming_chat.py; requests without ``messages`` continue on the
+        # historical prompt path below, bit-for-bit.
+        if req.messages is not None:
+            return chat_stream_response(registry, req, sampler_spec.name, params)
 
         # Resolve stop_texts against the backend's tokenizer right now so we
         # can bail with a 400 if a stop string isn't single-token, mirroring
@@ -435,11 +450,13 @@ def make_web_app(
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        f"backend {req.backend!r} is chat-only and "
-                        "generation is disabled until proper chat-mode "
-                        "UI lands. Use a /completions-capable provider "
-                        "(fireworks, lmstudio) or a local / remote "
-                        "dsbx backend."
+                        f"backend {req.backend!r} is chat-only: raw text "
+                        "continuation is disabled (the provider renders "
+                        "the chat template server-side). Switch the "
+                        "Decode tab to chat mode (structured messages), "
+                        "or use a /completions-capable provider "
+                        "(fireworks, lmstudio) / a local / remote dsbx "
+                        "backend."
                     ),
                 )
             stop_ids = list(req.stop_ids or [])
@@ -752,22 +769,6 @@ def _coerce_logit_bias(raw: dict[str, float] | None) -> dict[int, float] | None:
         except (TypeError, ValueError):
             continue
     return out or None
-
-
-def _use_backend(registry: BackendRegistry, name: str, model: str | None = None):
-    """``with _use_backend(...) as backend:`` -- lock + load.
-
-    ``model`` is honored only for cloud providers (see
-    :meth:`BackendRegistry.use`); other families ignore it but won't error,
-    so callers can pass the request's ``model`` field through without
-    branching on family.
-    """
-    try:
-        return registry.use(name, model=model)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except LookupError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _get_session_or_404(registry: ManualSessionRegistry, sid: str):

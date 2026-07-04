@@ -361,7 +361,10 @@ class BackendRegistry:
             return None
         is_chat_only = not bool(prov.has_completions)
         if is_chat_only:
-            notes = "chat-only provider; generation disabled until proper chat-mode UI lands"
+            notes = (
+                "chat-only provider; text continuation disabled -- use chat "
+                "mode (the provider renders the chat template server-side)"
+            )
         else:
             notes = "static caps from provider config (backend not yet loaded)"
         # Optimistic prediction of "local tokenizer available": if THIS
@@ -396,6 +399,7 @@ class BackendRegistry:
             supports_prepend_token_ids=(has_tokenizer_mapping and not is_chat_only),
             supports_local_tokenize=has_tokenizer_mapping,
             generation_disabled=is_chat_only,
+            supports_chat_stream=is_chat_only,
         )
 
     def _public_model_info(self, entry: _BackendEntry) -> tuple[str | None, list[str], bool]:

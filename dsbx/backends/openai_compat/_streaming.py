@@ -360,14 +360,14 @@ class _StreamingMixin:
                 for entry in lp_obj.get("content") or []:
                     if not isinstance(entry, dict):
                         continue
-                    tok = str(entry.get("token", ""))
+                    tok_text = str(entry.get("token", ""))
                     tid_raw = entry.get("token_id")
                     tid: int | None = int(tid_raw) if tid_raw is not None else None
                     lp_raw = entry.get("logprob")
                     lp = float(lp_raw) if lp_raw is not None else float("nan")
                     smc_raw = entry.get("sampling_mask_count")
                     smc = int(smc_raw) if smc_raw is not None else None
-                    records.append((tid, tok, lp, entry.get("top_logprobs", []), smc))
+                    records.append((tid, tok_text, lp, entry.get("top_logprobs", []), smc))
             else:
                 chunk_tokens = lp_obj.get("tokens") or []
                 chunk_lps = lp_obj.get("token_logprobs") or []
@@ -415,8 +415,13 @@ class _StreamingMixin:
         body: dict[str, Any],
         *,
         extra_headers: dict[str, str] | None = None,
+        path: str = "/completions",
     ) -> Iterator[dict[str, Any]]:
-        """Yield parsed JSON objects from a streaming ``/completions`` call.
+        """Yield parsed JSON objects from a streaming ``path`` SSE call.
+
+        Defaults to ``/completions`` (the historical caller); the chat
+        simulation path reuses the exact same retry / SSE-decode /
+        cleanup machinery against ``/chat/completions``.
 
         Wraps ``httpx.Client.stream`` so the rest of ``stream_native``
         stays free of SSE-decoding details. ``[DONE]`` terminates the
@@ -462,7 +467,7 @@ class _StreamingMixin:
             # rather than just an unincremented counter on this path.
             usage_mod.record_request(self._active_usage)
             try:
-                stream_cm = self._client.stream("POST", "/completions", **stream_kwargs)
+                stream_cm = self._client.stream("POST", path, **stream_kwargs)
             except Exception as exc:
                 last_exc = exc
                 if attempt < self._max_retries:
@@ -488,9 +493,9 @@ class _StreamingMixin:
                     if wait is None:
                         wait = self._base_backoff_s * (2**attempt) + random.uniform(0.0, 0.25)
                     log.warning(
-                        "%s: POST /completions (stream) -> HTTP %d; "
-                        "sleeping %.2fs before retry %d/%d",
+                        "%s: POST %s (stream) -> HTTP %d; sleeping %.2fs before retry %d/%d",
                         self.provider.name,
+                        path,
                         status,
                         wait,
                         attempt + 1,

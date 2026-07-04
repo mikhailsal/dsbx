@@ -281,7 +281,7 @@ class _EchoStreamingMixin:
                 for entry in lp_obj.get("content") or []:
                     if not isinstance(entry, dict):
                         continue
-                    tok = str(entry.get("token", ""))
+                    tok_text = str(entry.get("token", ""))
                     tid_raw = entry.get("token_id")
                     tid: int | None = int(tid_raw) if tid_raw is not None else None
                     lp_raw = entry.get("logprob")
@@ -297,7 +297,7 @@ class _EchoStreamingMixin:
                     positions.append(
                         (
                             tid,
-                            tok,
+                            tok_text,
                             lp,
                             entry.get("top_logprobs", []),
                             smc,

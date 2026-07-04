@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from dsbx.core.chat_template import ChatTemplateInfo, fetch_hf_chat_template, none_info
+
 if TYPE_CHECKING:
     import threading
 
@@ -30,6 +32,7 @@ class _TokenizerMixin:
         _bos_ids: tuple[int, ...]
         _id_to_text: dict[int, str]
         _text_to_id: dict[str, int]
+        _chat_template_cache: ChatTemplateInfo | None
         _BOS_TOKEN_CANDIDATES: tuple[str, ...]
         _INTERN_ID_BASE: int
 
@@ -212,6 +215,26 @@ class _TokenizerMixin:
             return []
         out.sort(key=lambda pair: pair[0])
         return out
+
+    def chat_template_info(self) -> ChatTemplateInfo:
+        """Chat template for ``self.model`` via its mapped HF repo.
+
+        Uses the same ``[providers.NAME.tokenizers]`` model->repo mapping
+        the local-tokenizer path relies on; fetches
+        ``tokenizer_config.json`` (+ the standalone ``chat_template.jinja``
+        newer repos ship) from the Hub on first call and caches the result
+        for the lifetime of this backend instance -- success OR graceful
+        failure, mirroring ``_ensure_tokenizer``'s no-respam policy.
+        """
+        if self._chat_template_cache is not None:
+            return self._chat_template_cache
+        repo = (self.provider.tokenizers or {}).get(self.model)
+        if not repo:
+            info = none_info(note="no HF tokenizer repo mapped for this model")
+        else:
+            info = fetch_hf_chat_template(repo)
+        self._chat_template_cache = info
+        return info
 
     def piece(self, token_id: int) -> str:
         tok = self._ensure_tokenizer()

@@ -264,6 +264,17 @@ _DEFAULTS: dict[str, Any] = {
                 "mistralai/mistral-7b-instruct-v0.3",
                 "google/gemma-2-9b-it",
             ],
+            # Chat-only provider: the tokenizer mapping powers chat mode's
+            # simulated raw-template preview + live token counter (repos
+            # must ship tokenizer.json AND the chat template). Llama /
+            # Gemma entries point at ungated mirrors of the gated official
+            # repos (identical tokenizer + chat-template files).
+            "tokenizers": {
+                "meta/llama-3.1-8b-instruct": "NousResearch/Meta-Llama-3.1-8B-Instruct",
+                "meta/llama-3.1-70b-instruct": "NousResearch/Meta-Llama-3.1-70B-Instruct",
+                "mistralai/mistral-7b-instruct-v0.3": "mistralai/Mistral-7B-Instruct-v0.3",
+                "google/gemma-2-9b-it": "unsloth/gemma-2-9b-it",
+            },
         },
         "openrouter": {
             "base_url": "https://openrouter.ai/api/v1",
@@ -279,6 +290,14 @@ _DEFAULTS: dict[str, Any] = {
                 "qwen/qwen-2.5-7b-instruct",
                 "google/gemma-2-9b-it",
             ],
+            # See the NIM block above for why these mappings exist and why
+            # Llama / Gemma use ungated mirror repos.
+            "tokenizers": {
+                "meta-llama/llama-3.1-8b-instruct": "NousResearch/Meta-Llama-3.1-8B-Instruct",
+                "meta-llama/llama-3.1-70b-instruct": "NousResearch/Meta-Llama-3.1-70B-Instruct",
+                "qwen/qwen-2.5-7b-instruct": "Qwen/Qwen2.5-7B-Instruct",
+                "google/gemma-2-9b-it": "unsloth/gemma-2-9b-it",
+            },
         },
         "lmstudio": {
             "base_url": "http://127.0.0.1:1234/v1",

@@ -12,6 +12,7 @@ import math
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
+from dsbx.core.chat_template import ChatTemplateInfo, none_info
 from dsbx.core.types import Capabilities, StepResult, TokenCandidate
 
 
@@ -124,6 +125,19 @@ class Backend(ABC):
             step.watched = {wid: self.lookup_watch(step, wid) for wid in watch_ids}
             results.append(step)
         return results
+
+    def chat_template_info(self) -> ChatTemplateInfo:
+        """The model's chat template + special-token metadata (if any).
+
+        Powers the Decode workbench's chat mode: the browser renders the
+        conversation through this Jinja template client-side to show (and
+        let the user edit) the exact raw text the model consumes.
+        ``template is None`` marks a base model -- the UI warns that the
+        model was not trained for chat and offers an explicit ChatML
+        fallback. Default: no template discovery available (chat-only /
+        stub backends), reported as ``source="none"``.
+        """
+        return none_info()
 
     def special_tokens(self) -> list[tuple[int, str]]:
         """Return the tokenizer's special / added tokens as ``(id, text)``.
