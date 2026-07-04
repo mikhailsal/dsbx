@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FILE_LINE_LIMIT = 700
 PYTHON_FUNCTION_LINE_LIMIT = 80
 
-CODE_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx"}
+CODE_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".svelte"}
 
 # Directories we never scan: VCS/venv, generated frontend output, vendored
 # deps, caches, and the test suite (long, data-heavy tests are fine).
@@ -53,6 +53,11 @@ LEGACY_FILE_BUDGETS = {
     "dsbx/web/streaming.py": 662,
     "dsbx/web/schemas.py": 629,
     "dsbx/server/app.py": 612,
+    # The Decode workbench page predates the component-split rule. All
+    # NEW UI must go into components/lib modules (the chat mode did:
+    # components/chat/* + lib/chat/* + lib/generate/*); the ceiling
+    # enforces that the page itself only ever shrinks.
+    "frontend/src/routes/generate/+page.svelte": 2182,
 }
 
 
