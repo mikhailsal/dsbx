@@ -75,14 +75,41 @@ export interface Capabilities {
    */
   supports_combined_echo_stream: boolean;
   /**
-   * When true, the backend is REGISTERED but inert: generate-stream
-   * requests against it are rejected with a 400 by the middleware,
-   * and the backend picker renders it as a disabled option with
-   * ``notes`` as the tooltip explanation. Set on chat-only OpenAI-
-   * compat providers (NIM / OpenRouter) until proper chat-mode UI
-   * lands. Default ``false`` for every other backend.
+   * When true, raw text continuation is disabled: generate-stream
+   * requests carrying a plain ``prompt`` are rejected with a 400 by
+   * the middleware. Set on chat-only OpenAI-compat providers
+   * (NIM / OpenRouter) whose upstreams refuse raw prompts (or
+   * silently rewrite them into chat messages server-side). Chat mode
+   * remains available when ``supports_chat_stream`` is also true.
    */
   generation_disabled: boolean;
+  /**
+   * When true, the backend can stream a structured ``messages[]``
+   * conversation natively via /chat/completions with per-token
+   * top_logprobs (the chat-mode "simulation" path for NIM /
+   * OpenRouter). Template-capable backends keep this false -- they
+   * receive the chat template rendered client-side as ``prompt``.
+   */
+  supports_chat_stream: boolean;
+}
+
+/**
+ * ``GET /api/v1/chat/template`` -- mirror of ``dsbx.web.schemas_chat``.
+ * Everything the chat composer needs to render/parse conversations
+ * client-side: the Jinja source, special tokens, and the base-model /
+ * degraded-discovery signals.
+ */
+export interface ChatTemplateResponse {
+  backend: string;
+  model: string | null;
+  template: string | null;
+  source: string;
+  bos_token: string | null;
+  eos_token: string | null;
+  special_tokens: Record<string, string>;
+  note: string;
+  is_base_model: boolean;
+  fallback_template: string;
 }
 
 export interface BackendInfo {
