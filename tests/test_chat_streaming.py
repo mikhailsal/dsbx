@@ -321,6 +321,90 @@ def test_chat_stream_delta_without_logprobs_degrades_to_nan(monkeypatch) -> None
     assert steps[0].step_result.candidates == []
 
 
+def test_chat_stream_whole_completion_in_one_delta(monkeypatch) -> None:
+    """Live-seen OpenRouter (WandB route) shape: the ENTIRE completion
+    arrives as one ``delta.content`` while ``logprobs.content`` carries
+    an entry only for the final EOT token. The user's text must stream
+    (as a NaN-logprob record) BEFORE the logprob-backed EOT step."""
+    backend, mock = _make_chat_backend(monkeypatch)
+    chunk = {
+        "choices": [
+            {
+                "delta": {"content": "Paris."},
+                "logprobs": {
+                    "content": [
+                        {
+                            "token": "<|eot_id|>",
+                            "logprob": -0.01,
+                            "top_logprobs": [{"token": "<|eot_id|>", "logprob": -0.01}],
+                        }
+                    ]
+                },
+                "finish_reason": "stop",
+            }
+        ]
+    }
+    _attach_stream(mock, [chunk])
+    steps = list(
+        backend.stream_chat_native(
+            _MESSAGES, sampler_name="greedy", sampler_params={}, max_tokens=8, top_k=5
+        )
+    )
+    assert [s.decision.token_text for s in steps] == ["Paris.", "<|eot_id|>"]
+    assert steps[0].step_result.candidates == []  # NaN degraded, no fake alts
+    assert steps[1].step_result.candidates  # the EOT entry kept its logprobs
+    assert steps[-1].stop_reason == "user_stop"
+
+
+def test_chat_stream_offset_logprob_entries_realign(monkeypatch) -> None:
+    """Live-seen OpenRouter/vLLM shape: logprob entries lag the delta
+    text by several tokens (chunk 1 says text "The cap" but carries the
+    entry for " France"). The aligner must emit every character of the
+    text exactly once, attaching each entry at its match position and
+    filling unmatched text with NaN records."""
+    backend, mock = _make_chat_backend(monkeypatch)
+
+    def chunk(text: str, entry_token: str | None, finish=None) -> dict:
+        lp = None
+        if entry_token is not None:
+            lp = {"content": [{"token": entry_token, "logprob": -0.05, "top_logprobs": []}]}
+        return {"choices": [{"delta": {"content": text}, "logprobs": lp, "finish_reason": finish}]}
+
+    _attach_stream(
+        mock,
+        [
+            chunk("The cap", " France"),
+            chunk("ita", " is"),
+            chunk("l of F", " Paris"),
+            chunk("r", "."),
+            chunk("ance is Paris.", "<|eot_id|>", finish="stop"),
+        ],
+    )
+    steps = list(
+        backend.stream_chat_native(
+            _MESSAGES, sampler_name="greedy", sampler_params={}, max_tokens=16, top_k=5
+        )
+    )
+    texts = [s.decision.token_text for s in steps]
+    assert texts == ["The capital of", " France", " is", " Paris", ".", "<|eot_id|>"]
+    # Reassembled text == exactly what the provider streamed (no dupes).
+    assert "".join(texts) == "The capital of France is Paris.<|eot_id|>"
+    assert steps[-1].stop_reason == "user_stop"
+
+
+def test_chat_stream_delta_covered_by_entries_not_duplicated(monkeypatch) -> None:
+    """The well-behaved shape (delta text == the logprob entries' text)
+    must NOT grow an extra NaN record."""
+    backend, mock = _make_chat_backend(monkeypatch)
+    _attach_stream(mock, [_chat_chunk(" Paris", -0.2, [(" Paris", -0.2)], finish="stop")])
+    steps = list(
+        backend.stream_chat_native(
+            _MESSAGES, sampler_name="greedy", sampler_params={}, max_tokens=2, top_k=5
+        )
+    )
+    assert [s.decision.token_text for s in steps] == [" Paris"]
+
+
 def test_chat_stream_records_usage(monkeypatch) -> None:
     backend, mock = _make_chat_backend(monkeypatch)
     usage_chunk = {

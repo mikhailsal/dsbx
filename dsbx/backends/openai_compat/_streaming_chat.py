@@ -35,6 +35,67 @@ log = logging.getLogger(__name__)
 # sampler would defeat the sandbox's "show the truth" mission.
 _CHAT_NATIVE_SAMPLERS = frozenset({"greedy", "temperature", "top_p"})
 
+# Emit-record shape shared with ``_genstep_from_emit_record``:
+# ``(token_id_or_None, text, logprob, top_payload, sampling_mask_count)``.
+_EmitRecord = tuple[int | None, str, float, Any, int | None]
+
+
+class _ChatRecordAligner:
+    """Reconcile the ``delta.content`` text stream with ``logprobs.content``.
+
+    Well-behaved providers keep the two in lockstep (each chunk's delta
+    text equals its logprob entries' concatenated tokens) and this class
+    is a pass-through. Live probing found providers that do NOT (an
+    OpenRouter/vLLM route streamed logprob entries offset from the text
+    by several tokens, with the first tokens never getting entries at
+    all). The contract this class restores: every character the provider
+    put in ``delta.content`` is emitted exactly once and in order --
+    backed by its logprob entry when one matches, as a NaN-logprob
+    filler record otherwise. Entries whose token text never shows up in
+    the text stream (typically the final EOT) are emitted at the end.
+    """
+
+    def __init__(self, make_filler: Any) -> None:
+        self._make_filler = make_filler
+        self._text = ""
+        self._entries: list[tuple[str, _EmitRecord]] = []
+
+    def push(self, delta_text: str, entries: list[tuple[str, _EmitRecord]]) -> list[_EmitRecord]:
+        self._text += delta_text
+        self._entries.extend(entries)
+        return self._drain(final=False)
+
+    def flush(self) -> list[_EmitRecord]:
+        return self._drain(final=True)
+
+    def _drain(self, *, final: bool) -> list[_EmitRecord]:
+        out: list[_EmitRecord] = []
+        while self._entries:
+            token, record = self._entries[0]
+            idx = self._text.find(token) if token else 0
+            if idx == -1:
+                if not final:
+                    # The entry's text hasn't arrived in the delta stream
+                    # yet -- wait for more chunks before deciding.
+                    return out
+                # Final: the token never appears in the text (EOT-style).
+                # Uncovered text goes first, then the entry itself.
+                if self._text:
+                    out.append(self._make_filler(self._text))
+                    self._text = ""
+                out.append(record)
+                self._entries.pop(0)
+                continue
+            if idx > 0:
+                out.append(self._make_filler(self._text[:idx]))
+            self._text = self._text[idx + len(token) :]
+            out.append(record)
+            self._entries.pop(0)
+        if final and self._text:
+            out.append(self._make_filler(self._text))
+            self._text = ""
+        return out
+
 
 class _ChatStreamingMixin:
     # Composite-class attributes / cross-mixin methods; see the sibling
@@ -143,8 +204,26 @@ class _ChatStreamingMixin:
         # with each emitted token id.
         tokens_before: list[int] = []
         step_idx = 0
-        prev_record: tuple[int | None, str, float, Any, int | None] | None = None
+        prev_record: _EmitRecord | None = None
         last_finish_reason: str | None = None
+        aligner = _ChatRecordAligner(self._nan_record)
+
+        def _emit(rec: _EmitRecord) -> Iterator[GenStep]:
+            # One-record lookahead so the terminal step can be stamped
+            # with the mapped finish_reason (same idiom as /completions).
+            nonlocal prev_record, step_idx
+            if prev_record is not None:
+                yield self._genstep_from_emit_record(
+                    prev_record,
+                    tokens_before=tokens_before,
+                    step_idx=step_idx,
+                    is_last=False,
+                    last_finish_reason=last_finish_reason,
+                    watch_ids=watch_ids,
+                    note=note,
+                )
+                step_idx += 1
+            prev_record = rec
 
         for chunk in self._iter_completions_stream(body, path="/chat/completions"):
             u = chunk.get("usage") if isinstance(chunk, dict) else None
@@ -162,19 +241,12 @@ class _ChatStreamingMixin:
             fr = ch.get("finish_reason")
             if fr is not None:
                 last_finish_reason = str(fr)
-            for rec in self._chat_records(ch):
-                if prev_record is not None:
-                    yield self._genstep_from_emit_record(
-                        prev_record,
-                        tokens_before=tokens_before,
-                        step_idx=step_idx,
-                        is_last=False,
-                        last_finish_reason=last_finish_reason,
-                        watch_ids=watch_ids,
-                        note=note,
-                    )
-                    step_idx += 1
-                prev_record = rec
+            delta_text, entries = self._chat_records(ch)
+            for rec in aligner.push(delta_text, entries):
+                yield from _emit(rec)
+
+        for rec in aligner.flush():
+            yield from _emit(rec)
 
         if prev_record is not None:
             yield self._genstep_from_emit_record(
@@ -187,21 +259,18 @@ class _ChatStreamingMixin:
                 note=note,
             )
 
-    def _chat_records(
-        self, choice: dict[str, Any]
-    ) -> list[tuple[int | None, str, float, Any, int | None]]:
-        """Parse one streamed chat choice into emit records.
+    def _chat_records(self, choice: dict[str, Any]) -> tuple[str, list[tuple[str, _EmitRecord]]]:
+        """Parse one streamed chat choice for the record aligner.
 
-        Record shape matches :meth:`_genstep_from_emit_record`:
-        ``(token_id_or_None, text, logprob, top_payload, smc)``. The
+        Returns ``(delta_text, [(token_text, emit_record), ...])``. The
         chat schema nests per-token data under ``logprobs.content[]``
         with ``top_logprobs`` as a ``[{token, logprob}]`` list (which
         ``_cands_from_list`` / ``_candidates_from_top_entry`` already
-        handle). A chunk that carries ``delta.content`` but NO logprobs
-        (provider quirk) degrades to a NaN-logprob record so the text
-        still streams instead of vanishing.
+        handle); the :class:`_ChatRecordAligner` then reconciles these
+        entries with the ``delta.content`` text stream, because live
+        providers were seen emitting the two out of lockstep.
         """
-        records: list[tuple[int | None, str, float, Any, int | None]] = []
+        records: list[tuple[str, _EmitRecord]] = []
         lp_obj = choice.get("logprobs") or {}
         entries = lp_obj.get("content") or []
         for entry in entries:
@@ -217,21 +286,13 @@ class _ChatStreamingMixin:
             for item in tops:
                 if isinstance(item, dict) and "token_id" not in item:
                     item["token_id"] = self._resolve_chat_token_id(str(item.get("token", "")))
-            records.append((self._resolve_chat_token_id(text), text, lp, tops, None))
-        if not entries:
-            delta = choice.get("delta") or {}
-            content = delta.get("content")
-            if content:
-                records.append(
-                    (
-                        self._resolve_chat_token_id(str(content)),
-                        str(content),
-                        float("nan"),
-                        [],
-                        None,
-                    )
-                )
-        return records
+            records.append((text, (self._resolve_chat_token_id(text), text, lp, tops, None)))
+        delta = choice.get("delta") or {}
+        return str(delta.get("content") or ""), records
+
+    def _nan_record(self, text: str) -> _EmitRecord:
+        """Filler record for delta text that has no logprob entry."""
+        return (self._resolve_chat_token_id(text), text, float("nan"), [], None)
 
     def _resolve_chat_token_id(self, text: str) -> int | None:
         """Map a chat-stream token text to a real model id when possible.
