@@ -157,5 +157,21 @@
       value={block.content}
       oninput={(e) => onChange({ ...block, content: e.currentTarget.value })}
     ></textarea>
+    {#if block.kind === 'assistant'}
+      <label class="flex items-center gap-1.5 text-[11px] text-slate-400">
+        <input
+          type="checkbox"
+          class="accent-emerald-500"
+          {disabled}
+          checked={block.prefill ?? false}
+          onchange={(e) => onChange({ ...block, prefill: e.currentTarget.checked || undefined })}
+        />
+        prefill (open turn)
+        <span
+          class="text-slate-600"
+          title="Leave the turn UNCLOSED: no end-of-turn markers are rendered after this text, so the model continues mid-turn from exactly here. Only effective on the final block. Set automatically by “append as assistant” when the run was cut off by max_tokens."
+        >— model continues this turn</span>
+      </label>
+    {/if}
   {/if}
 </div>

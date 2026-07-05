@@ -138,8 +138,13 @@ export function parseRaw(raw: string, profile: TemplateProfile): ParseResult {
     const suffixAt = entry.suffix ? raw.indexOf(entry.suffix, contentStart) : -1;
     if (suffixAt === -1) {
       // Unterminated final turn -- normal when the user is mid-edit or
-      // prefilling; keep it as the last block.
+      // prefilling; keep it as the last block, flagged as an open turn so
+      // re-rendering does NOT close it (blocks <-> raw stays lossless).
       appendRoleContent(blocks, warnings, profile, entry.role, raw.slice(contentStart));
+      const last = blocks[blocks.length - 1];
+      if (entry.role === 'assistant' && last?.kind === 'assistant') {
+        last.prefill = true;
+      }
       warnings.push(
         `final ${entry.role} turn is not closed with ${JSON.stringify(entry.suffix)}; kept as an open turn.`
       );

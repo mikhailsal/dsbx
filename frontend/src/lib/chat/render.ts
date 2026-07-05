@@ -157,21 +157,53 @@ export function renderChat(doc: ChatDoc, inputs: TemplateInputs): RenderResult {
     warnings.push('model ships no chat template; using the generic ChatML fallback.');
   }
   const source = inputs.template ?? FALLBACK_CHATML_TEMPLATE;
+  const prefill = prefillContent(doc, warnings);
 
   let raw = '';
   let error: string | null = null;
   try {
     const template = new Template(source);
     const context: Record<string, unknown> = {
-      messages,
-      add_generation_prompt: doc.addGenerationPrompt,
+      // A trailing prefill block is NOT rendered through the template:
+      // templates close (or mangle -- Qwen strips non-final <think>
+      // sections) every message they render. Instead the prior turns
+      // render with the generation prompt and the prefill text is
+      // appended verbatim -- reproducing the exact token context of the
+      // mid-turn model, open reasoning sections included.
+      messages: prefill === null ? messages : messages.slice(0, -1),
+      add_generation_prompt: prefill === null ? doc.addGenerationPrompt : true,
       bos_token: inputs.bosToken ?? '',
       eos_token: inputs.eosToken ?? ''
     };
     if (tools) context.tools = tools;
     raw = template.render(context);
+    if (prefill !== null) raw += prefill;
   } catch (e) {
     error = e instanceof Error ? e.message : String(e);
   }
   return { raw, messages, tools, usedFallback, warnings, error };
+}
+
+/**
+ * The trailing prefill text, or ``null`` when the doc ends in a closed
+ * turn. Prefill flags anywhere else are ignored with a warning -- an open
+ * turn mid-conversation is not representable in template output.
+ */
+function prefillContent(doc: ChatDoc, warnings: string[]): string | null {
+  const blocks = doc.blocks;
+  const openAt = blocks.findIndex((b) => b.kind === 'assistant' && b.prefill);
+  if (openAt === -1) return null;
+  const last = blocks[blocks.length - 1];
+  if (openAt !== blocks.length - 1 || last.kind !== 'assistant' || !last.prefill) {
+    warnings.push(
+      'prefill flag ignored: only the FINAL assistant block can be an open (prefill) turn.'
+    );
+    return null;
+  }
+  if (doc.addGenerationPrompt) {
+    warnings.push(
+      'prefill assistant block supersedes "add generation prompt" (the open turn already cues the model).'
+    );
+  }
+  return last.content;
 }

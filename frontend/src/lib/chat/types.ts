@@ -13,7 +13,15 @@
 export type ChatBlock =
   | { kind: 'system'; content: string }
   | { kind: 'user'; content: string }
-  | { kind: 'assistant'; content: string }
+  /**
+   * ``prefill`` marks an OPEN assistant turn: the turn's closing markers
+   * are not rendered, so the model continues mid-turn from exactly this
+   * text (the raw prompt becomes ``...generation prompt + content``).
+   * Only meaningful on the FINAL block; "append as assistant" sets it
+   * automatically when the source run stopped on max_tokens instead of a
+   * natural end-of-turn.
+   */
+  | { kind: 'assistant'; content: string; prefill?: boolean }
   /**
    * Reasoning/thinking section of the FOLLOWING assistant block (or a
    * standalone thinking turn if no assistant block follows). Rendered

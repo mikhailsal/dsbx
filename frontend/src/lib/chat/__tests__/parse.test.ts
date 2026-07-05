@@ -73,7 +73,9 @@ describe('parseRaw structure handling', () => {
     expect(result.ok).toBe(true);
     expect(result.doc.addGenerationPrompt).toBe(false);
     const last = result.doc.blocks[result.doc.blocks.length - 1];
-    expect(last).toEqual({ kind: 'assistant', content: 'Sure, ' });
+    // ``prefill: true`` so blocks -> raw re-renders the SAME open turn
+    // instead of appending end-of-turn markers (lossless round trip).
+    expect(last).toEqual({ kind: 'assistant', content: 'Sure, ', prefill: true });
     expect(result.warnings.join(' ')).toContain('not closed');
   });
 

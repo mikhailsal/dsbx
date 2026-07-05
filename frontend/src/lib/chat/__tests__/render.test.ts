@@ -81,6 +81,62 @@ describe('renderChat against transformers ground truth', () => {
   });
 });
 
+describe('prefill (open assistant turn)', () => {
+  it('renders prior turns + generation prompt + verbatim content, no closing markers', () => {
+    // The open turn must reproduce the EXACT context of a mid-stream
+    // model: prior conversation rendered normally, generation prompt,
+    // then the partial text -- and no end-of-turn markers after it.
+    const doc: ChatDoc = {
+      blocks: [
+        { kind: 'user', content: 'hi' },
+        { kind: 'assistant', content: 'The answer', prefill: true }
+      ],
+      addGenerationPrompt: false
+    };
+    const result = renderChat(doc, inputsOf('chatml'));
+    expect(result.error).toBeNull();
+    // (The Qwen2.5 ChatML template injects its default system prompt
+    // before the conversation; the open turn is what we assert on.)
+    expect(result.raw.endsWith('<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\nThe answer')).toBe(
+      true
+    );
+    // The simulation path still sees the full structured conversation.
+    expect(result.messages).toHaveLength(2);
+    expect(result.messages[1]).toMatchObject({ role: 'assistant', content: 'The answer' });
+  });
+
+  it('preserves an OPEN <think> section verbatim (the qwen truncation case)', () => {
+    // Qwen templates strip/rework <think> sections of CLOSED turns; a
+    // truncated run appended as prefill must keep the partial reasoning
+    // exactly as the model emitted it.
+    const partial = '<think>\nLet me count: 3+3 is';
+    const doc: ChatDoc = {
+      blocks: [
+        { kind: 'user', content: 'And 3+3?' },
+        { kind: 'assistant', content: partial, prefill: true }
+      ],
+      addGenerationPrompt: false
+    };
+    const result = renderChat(doc, inputsOf('qwen3'));
+    expect(result.error).toBeNull();
+    expect(result.raw.endsWith(partial)).toBe(true);
+    expect(result.raw).not.toContain('</think>');
+  });
+
+  it('ignores a prefill flag on a non-final block, with a warning', () => {
+    const doc: ChatDoc = {
+      blocks: [
+        { kind: 'assistant', content: 'early', prefill: true },
+        { kind: 'user', content: 'q' }
+      ],
+      addGenerationPrompt: true
+    };
+    const result = renderChat(doc, inputsOf('chatml'));
+    expect(result.warnings.join(' ')).toContain('prefill flag ignored');
+    expect(result.raw).toContain('early<|im_end|>');
+  });
+});
+
 describe('blocksToMessages', () => {
   it('attaches a reasoning block to the following assistant message', () => {
     const { messages, warnings } = blocksToMessages([
