@@ -34,7 +34,9 @@ describe('renderTokenSegments', () => {
   });
 
   it('rewrites newline and tab inline', () => {
-    expect(renderTokenPlain('a\nb')).toBe('a\u21B5b');
+    // The ↵ marker keeps the real \n after it so pre-wrap containers
+    // actually break the line where the token does.
+    expect(renderTokenPlain('a\nb')).toBe('a\u21B5\nb');
     expect(renderTokenPlain('a\tb')).toBe('a\u2192b');
   });
 
