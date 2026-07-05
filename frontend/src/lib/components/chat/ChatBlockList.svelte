@@ -10,10 +10,22 @@
   interface Props {
     doc: ChatDoc;
     profile: TemplateProfile | null;
+    backend: string;
+    model: string;
+    /** Backend has a real local tokenizer -> inline token highlighting. */
+    tokenizeSupported: boolean;
     disabled?: boolean;
     onChange: (doc: ChatDoc) => void;
   }
-  let { doc, profile, disabled = false, onChange }: Props = $props();
+  let {
+    doc,
+    profile,
+    backend,
+    model,
+    tokenizeSupported,
+    disabled = false,
+    onChange
+  }: Props = $props();
 
   function newBlock(kind: ChatBlockKind): ChatBlock {
     switch (kind) {
@@ -84,6 +96,9 @@
       {block}
       index={i}
       count={doc.blocks.length}
+      {backend}
+      {model}
+      {tokenizeSupported}
       {disabled}
       onChange={(b) => updateBlock(i, b)}
       onRemove={() => removeBlock(i)}

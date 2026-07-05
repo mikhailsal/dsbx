@@ -1,22 +1,40 @@
 <script lang="ts">
   /**
    * One editable conversation block. The per-kind affordances live here:
-   * plain textareas for message roles, JSON editors (with live validation)
-   * for tool definitions / calls, and the reasoning block's "attaches to
-   * the next assistant turn" explainer.
+   * token-highlighting textareas for message content (same inline shading
+   * as the Text-mode prompt -- the text IS the input, no separate
+   * preview), JSON editors (with live validation) for tool definitions /
+   * calls, and the reasoning block's "attaches to the next assistant
+   * turn" explainer.
    */
+  import TokenTextarea from '$lib/components/TokenTextarea.svelte';
   import type { ChatBlock } from '$lib/chat/types';
 
   interface Props {
     block: ChatBlock;
     index: number;
     count: number;
+    backend: string;
+    model: string;
+    /** Backend has a real local tokenizer -> inline token highlighting. */
+    tokenizeSupported: boolean;
     disabled?: boolean;
     onChange: (block: ChatBlock) => void;
     onRemove: () => void;
     onMove: (delta: -1 | 1) => void;
   }
-  let { block, index, count, disabled = false, onChange, onRemove, onMove }: Props = $props();
+  let {
+    block,
+    index,
+    count,
+    backend,
+    model,
+    tokenizeSupported,
+    disabled = false,
+    onChange,
+    onRemove,
+    onMove
+  }: Props = $props();
 
   const meta: Record<ChatBlock['kind'], { label: string; accent: string; hint: string }> = {
     system: {
@@ -132,14 +150,15 @@
       <p class="text-[11px] text-rose-400">invalid arguments JSON: {err}</p>
     {/if}
   {:else if block.kind === 'tool_result'}
-    <textarea
-      class="input w-full font-mono text-xs"
-      rows="2"
-      placeholder="tool output"
+    <TokenTextarea
+      bind:value={() => block.content, (v) => onChange({ ...block, content: v })}
+      {backend}
+      {model}
+      enabled={tokenizeSupported}
       {disabled}
-      value={block.content}
-      oninput={(e) => onChange({ ...block, content: e.currentTarget.value })}
-    ></textarea>
+      rows={2}
+      placeholder="tool output"
+    />
     <input
       type="text"
       class="input w-full font-mono text-[11px]"
@@ -149,14 +168,15 @@
       oninput={(e) => onChange({ ...block, name: e.currentTarget.value || undefined })}
     />
   {:else}
-    <textarea
-      class="input w-full text-sm"
+    <TokenTextarea
+      bind:value={() => block.content, (v) => onChange({ ...block, content: v })}
+      {backend}
+      {model}
+      enabled={tokenizeSupported}
+      {disabled}
       rows={block.kind === 'assistant_reasoning' ? 2 : 3}
       placeholder={meta[block.kind].hint}
-      {disabled}
-      value={block.content}
-      oninput={(e) => onChange({ ...block, content: e.currentTarget.value })}
-    ></textarea>
+    />
     {#if block.kind === 'assistant'}
       <label class="flex items-center gap-1.5 text-[11px] text-slate-400">
         <input

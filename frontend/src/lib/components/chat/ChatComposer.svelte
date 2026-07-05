@@ -22,7 +22,6 @@
   import ChatBlockList from './ChatBlockList.svelte';
   import ChatRawEditor from './ChatRawEditor.svelte';
   import ChatTemplatePanel from './ChatTemplatePanel.svelte';
-  import TokenizedText from '$lib/components/TokenizedText.svelte';
   import { fetchChatTemplate, templateInputsOf } from '$lib/chat/template';
   import { deriveProfile } from '$lib/chat/profile';
   import { renderChat } from '$lib/chat/render';
@@ -235,33 +234,21 @@
     </div>
 
     {#if subMode === 'blocks'}
-      <ChatBlockList {doc} {profile} {disabled} onChange={(d) => (doc = d)} />
+      <ChatBlockList
+        {doc}
+        {profile}
+        {backend}
+        {model}
+        {tokenizeSupported}
+        {disabled}
+        onChange={(d) => (doc = d)}
+      />
       {#if parseWarnings.length}
         <div class="text-[11px] text-amber-400 space-y-0.5">
           {#each parseWarnings as w (w)}
             <div>⚠ {w}</div>
           {/each}
         </div>
-      {/if}
-      {#if rendered && !rendered.error}
-        <details class="rounded border border-slate-800 bg-slate-900/40" open>
-          <summary class="cursor-pointer px-3 py-2 text-xs text-slate-400 hover:text-slate-200 select-none">
-            rendered prompt
-            <span class="ml-2 font-mono text-[10px] text-slate-500">
-              {simulation
-                ? 'simulated — the provider renders the real template server-side'
-                : 'this exact text is sent as the prompt'}
-            </span>
-          </summary>
-          <div class="px-3 pb-3">
-            <TokenizedText
-              text={rendered.raw}
-              {backend}
-              {model}
-              enabled={tokenizeSupported}
-            />
-          </div>
-        </details>
       {/if}
     {:else}
       <ChatRawEditor

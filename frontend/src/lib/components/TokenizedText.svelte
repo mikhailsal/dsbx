@@ -1,11 +1,11 @@
 <script lang="ts">
   /**
    * Read-only token-boundary highlighting for an arbitrary text: the
-   * chat-mode sibling of ``TokenComposer``'s backdrop. Used for the
-   * rendered-prompt preview in Blocks mode and the simulation-mode raw
-   * preview, so "what the model actually sees" is shown with the same
-   * alternating token shading (specials in magenta) as the editable
-   * prompt in Text mode.
+   * non-editable sibling of ``TokenTextarea``. Used for the chat Raw
+   * tab when it cannot be edited (simulation providers render the real
+   * template server-side; some templates don't round-trip the parser),
+   * so "what the model most likely sees" still shows the same
+   * alternating token shading (specials in magenta) as everywhere else.
    *
    * Degrades to plain text when the backend has no local tokenizer
    * (``enabled=false``) or while the first tokenize is in flight -- it
