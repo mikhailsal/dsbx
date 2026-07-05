@@ -31,7 +31,13 @@
    */
   import { onDestroy, tick } from 'svelte';
   import { apiFetch, ApiError } from '$lib/api';
-  import { isSpecialText } from '$lib/render';
+  import {
+    requestTokenize,
+    segmentPieces,
+    tokenizeErrorText,
+    type TokenizePreview,
+    type TokenizeSegment
+  } from '$lib/tokenize';
 
   interface Props {
     /** Bound prompt text (the model input being composed). */
@@ -47,6 +53,9 @@
     placeholder?: string;
     rows?: number;
     debounceMs?: number;
+    /** Header label ("prompt" on the Decode page, "raw prompt" in chat). */
+    label?: string;
+    disabled?: boolean;
   }
 
   let {
@@ -56,14 +65,12 @@
     enabled,
     placeholder = 'Type your prompt. Insert special tokens from the palette below.',
     rows = 6,
-    debounceMs = 200
+    debounceMs = 200,
+    label = 'prompt',
+    disabled = false
   }: Props = $props();
 
   // ---- live tokenization (debounced + abortable) ---------------------- //
-  interface TokenizePreview {
-    ids: number[];
-    pieces: string[];
-  }
   let preview = $state<TokenizePreview | null>(null);
   let busy = $state(false);
   let tokError = $state('');
@@ -100,24 +107,13 @@
     const ctrl = new AbortController();
     abortCtrl = ctrl;
     try {
-      const data = await apiFetch<TokenizePreview>('/api/v1/tokenize', {
-        method: 'POST',
-        body: JSON.stringify({ backend: b, model: m, text: snapshot }),
-        signal: ctrl.signal
-      });
+      const data = await requestTokenize(b, m, snapshot, ctrl.signal);
       if (snapshot !== value || b !== backend || m !== model) return;
-      preview = {
-        ids: data.ids,
-        pieces:
-          data.pieces && data.pieces.length === data.ids.length ? data.pieces : []
-      };
+      preview = data;
       previewKey = `${b}|${m}|${snapshot}`;
     } catch (err) {
       if ((err as Error).name === 'AbortError') return;
-      tokError =
-        err instanceof ApiError
-          ? `tokenize failed: HTTP ${err.status}`
-          : `tokenize failed: ${(err as Error).message || 'unknown'}`;
+      tokError = tokenizeErrorText(err);
     } finally {
       if (abortCtrl === ctrl) abortCtrl = null;
       busy = false;
@@ -148,36 +144,11 @@
   let isFresh = $derived(previewKey === inputKey());
   let tokenCount = $derived(preview ? preview.ids.length : 0);
 
-  interface Seg {
-    text: string;
-    special: boolean;
-    idx: number;
-  }
-  // Greedily walk the source string, attributing each piece's length to a
-  // slice OF THE SOURCE (so concatenated segments === value, guaranteeing
-  // alignment). When a piece matches at the cursor we advance by its
-  // length; if a tokenizer's decode diverges from the source we still
-  // advance by the piece length so we never desync the whole field.
-  let segments = $derived.by<Seg[]>(() => {
-    if (!preview || !isFresh || preview.pieces.length === 0) return [];
-    const text = value;
-    const pieces = preview.pieces;
-    const segs: Seg[] = [];
-    let pos = 0;
-    for (let k = 0; k < pieces.length && pos <= text.length; k++) {
-      const pc = pieces[k] ?? '';
-      const len = pc.length;
-      if (len <= 0) continue;
-      const take = Math.min(len, text.length - pos);
-      if (take <= 0) break;
-      segs.push({ text: text.slice(pos, pos + take), special: isSpecialText(pc), idx: k });
-      pos += take;
-    }
-    if (pos < text.length) {
-      segs.push({ text: text.slice(pos), special: false, idx: pieces.length });
-    }
-    return segs;
-  });
+  // Source-slice segmentation lives in ``$lib/tokenize`` (shared with the
+  // read-only ``TokenizedText`` so chat mode highlights identically).
+  let segments = $derived.by<TokenizeSegment[]>(() =>
+    preview && isFresh ? segmentPieces(value, preview.pieces) : []
+  );
 
   // ---- special-token palette ----------------------------------------- //
   interface SpecialTok {
@@ -280,18 +251,33 @@
   let taEl = $state<HTMLTextAreaElement | null>(null);
   let backdropEl = $state<HTMLDivElement | null>(null);
 
-  function insertAtCaret(s: string): void {
+  function insertAtCaret(s: string, cursorBack = 0): void {
     const el = taEl;
     const start = el ? el.selectionStart : value.length;
     const end = el ? el.selectionEnd : value.length;
     value = value.slice(0, start) + s + value.slice(end);
     void tick().then(() => {
       if (!el) return;
-      const pos = start + s.length;
+      const pos = start + s.length - cursorBack;
       el.focus();
       el.setSelectionRange(pos, pos);
       syncScroll();
     });
+  }
+
+  /** Splice ``s`` at the caret (public: chat raw mode's snippet buttons).
+   * ``cursorBack`` parks the cursor that many chars earlier -- inside an
+   * open/close marker pair. */
+  export function insertText(s: string, cursorBack = 0): void {
+    insertAtCaret(s, cursorBack);
+  }
+
+  /** Focus + select a range (public: "jump to parse error"). */
+  export function focusRange(start: number, end: number): void {
+    const el = taEl;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(start, end);
   }
 
   function syncScroll(): void {
@@ -304,7 +290,7 @@
 
 <div class="composer">
   <div class="composer-head">
-    <span class="label-inline">prompt</span>
+    <span class="label-inline">{label}</span>
     {#if enabled}
       <span class="meta">
         {#if busy}<span class="dot">…</span>{/if}
@@ -328,13 +314,14 @@
         bind:value
         {rows}
         {placeholder}
+        {disabled}
         spellcheck="false"
         class="ta"
         onscroll={syncScroll}
       ></textarea>
     </div>
   {:else}
-    <textarea bind:value {rows} placeholder="prompt (no local tokenizer on this backend)" class="ta ta-plain"></textarea>
+    <textarea bind:value {rows} {disabled} placeholder="prompt (no local tokenizer on this backend)" class="ta ta-plain"></textarea>
   {/if}
 
   {#if enabled}

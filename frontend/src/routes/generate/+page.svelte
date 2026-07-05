@@ -250,7 +250,7 @@
    *  instead of the text-mode prompt box. */
   function addTokenToPrompt(text: string): void {
     if (composerMode === 'chat') {
-      chatComposer?.appendAssistant(text);
+      chatComposer?.appendAssistant(text, false); // one token != a finished turn
       return;
     }
     prompt = prompt + text;
@@ -274,10 +274,12 @@
 
   /** Chat-mode sibling of "move to prompt": fold the streamed completion
    *  into the conversation as an assistant block (or append to the raw
-   *  editor), so the user can continue the dialogue from what the model
-   *  actually said. */
+   *  editor). A run that ended the turn naturally (eos / stop token)
+   *  becomes a closed turn; a truncated one (max_tokens / cancelled)
+   *  becomes an OPEN prefill block the model can continue mid-turn. */
   function appendCompletionAsAssistant(): void {
-    chatComposer?.appendAssistant(completionText);
+    const finished = stopReason === 'eos' || stopReason === 'user_stop';
+    chatComposer?.appendAssistant(completionText, finished);
   }
 
   /** Scroll the matching generation-steps row into view and flash it, so
@@ -1380,15 +1382,12 @@
     <div class="card py-2 px-3">
       <!--
         The prompt composer: an editable field with INLINE token-boundary
-        highlighting plus a model-specific special-token palette. It lives
-        here (right column, above "running completion") so the student sees
-        "what I typed / how it tokenizes" right next to "what the model
-        emits". ``enabled`` gates the highlight + palette on a real local
-        tokenizer; without one it degrades to a plain textarea.
-
-        The run controls (inspect / generate / manual) sit DIRECTLY under
-        the composer -- they used to live at the bottom of the left config
-        card where they got lost far from the input the user is editing.
+        highlighting plus a model-specific special-token palette, placed
+        right column / above "running completion" so "what I typed / how
+        it tokenizes" sits next to "what the model emits". ``enabled``
+        gates highlight + palette on a real local tokenizer (plain
+        textarea otherwise). The run controls sit DIRECTLY under the
+        composer, next to the input being edited.
       -->
       <!--
         Text | Chat toggle. Text = the historical raw-continuation
@@ -1426,6 +1425,7 @@
           backend={backend}
           model={model}
           simulation={chatSimulation}
+          tokenizeSupported={localTokenizeSupported}
           disabled={busy}
           bind:prompt={chatPrompt}
           bind:messages={chatMessages}

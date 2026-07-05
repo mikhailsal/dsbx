@@ -22,6 +22,7 @@
   import ChatBlockList from './ChatBlockList.svelte';
   import ChatRawEditor from './ChatRawEditor.svelte';
   import ChatTemplatePanel from './ChatTemplatePanel.svelte';
+  import TokenizedText from '$lib/components/TokenizedText.svelte';
   import { fetchChatTemplate, templateInputsOf } from '$lib/chat/template';
   import { deriveProfile } from '$lib/chat/profile';
   import { renderChat } from '$lib/chat/render';
@@ -35,6 +36,8 @@
     model: string;
     /** Chat-only provider: messages[] payload + read-only raw preview. */
     simulation: boolean;
+    /** Backend has a real local tokenizer -> token-boundary highlighting. */
+    tokenizeSupported: boolean;
     disabled?: boolean;
     /** Rendered raw prompt (bindable output; template-capable path). */
     prompt: string;
@@ -48,6 +51,7 @@
     backend,
     model,
     simulation,
+    tokenizeSupported,
     disabled = false,
     prompt = $bindable(),
     messages = $bindable(),
@@ -141,8 +145,14 @@
   }
 
   /** "append as assistant block" -- the chat-mode sibling of the text
-   * mode's "move to prompt" (exposed on the component instance). */
-  export function appendAssistant(text: string): void {
+   * mode's "move to prompt" (exposed on the component instance).
+   *
+   * ``finished`` says whether the source run ended the turn naturally
+   * (EOS / stop token). An UNFINISHED run (max_tokens, cancelled)
+   * becomes an open prefill block instead of a closed turn -- closing it
+   * would falsely append end-of-turn markers mid-sentence (and mangle
+   * open ``<think>`` sections on re-render). */
+  export function appendAssistant(text: string, finished: boolean): void {
     if (!text) return;
     if (subMode === 'raw' && rawEditable) {
       rawText = rawText + text;
@@ -150,9 +160,10 @@
     }
     doc = {
       ...doc,
-      blocks: [...doc.blocks, { kind: 'assistant', content: text }],
+      blocks: [...doc.blocks, { kind: 'assistant', content: text, prefill: !finished }],
       // The model just spoke; don't immediately cue another assistant
-      // turn -- the user will typically add a user block next.
+      // turn -- the user will typically add a user block next (or, for
+      // a prefill block, generation continues the open turn directly).
       addGenerationPrompt: false
     };
   }
@@ -232,9 +243,32 @@
           {/each}
         </div>
       {/if}
+      {#if rendered && !rendered.error}
+        <details class="rounded border border-slate-800 bg-slate-900/40" open>
+          <summary class="cursor-pointer px-3 py-2 text-xs text-slate-400 hover:text-slate-200 select-none">
+            rendered prompt
+            <span class="ml-2 font-mono text-[10px] text-slate-500">
+              {simulation
+                ? 'simulated — the provider renders the real template server-side'
+                : 'this exact text is sent as the prompt'}
+            </span>
+          </summary>
+          <div class="px-3 pb-3">
+            <TokenizedText
+              text={rendered.raw}
+              {backend}
+              {model}
+              enabled={tokenizeSupported}
+            />
+          </div>
+        </details>
+      {/if}
     {:else}
       <ChatRawEditor
         value={subMode === 'raw' && rawEditable ? rawText : (rendered?.raw ?? '')}
+        {backend}
+        {model}
+        {tokenizeSupported}
         {snippets}
         readonly={!rawEditable}
         {disabled}
