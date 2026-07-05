@@ -14,7 +14,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from dsbx.core.backend import Backend
-from dsbx.core.chat_template import ChatTemplateInfo, none_info, template_from_config_value
+from dsbx.core.chat_template import (
+    ChatTemplateInfo,
+    looks_like_base_model,
+    none_info,
+    template_from_config_value,
+)
 from dsbx.core.types import Capabilities, StepResult, TokenCandidate
 
 
@@ -136,6 +141,9 @@ class HFBackend(Backend):
         info.bos_token = str(bos) if bos else None
         info.eos_token = str(eos) if eos else None
         info.special_tokens = specials
+        # Some vendors (Qwen notably) ship a chat template in base-model
+        # repos too, so the repo name is the honest second signal.
+        info.base_hint = looks_like_base_model(self.model_id)
         return info
 
     def special_tokens(self) -> list[tuple[int, str]]:

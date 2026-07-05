@@ -5,7 +5,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from dsbx.core.chat_template import ChatTemplateInfo, fetch_hf_chat_template, none_info
+from dsbx.core.chat_template import (
+    ChatTemplateInfo,
+    fetch_hf_chat_template,
+    looks_like_base_model,
+    none_info,
+)
 
 if TYPE_CHECKING:
     import threading
@@ -219,20 +224,24 @@ class _TokenizerMixin:
     def chat_template_info(self) -> ChatTemplateInfo:
         """Chat template for ``self.model`` via its mapped HF repo.
 
-        Uses the same ``[providers.NAME.tokenizers]`` model->repo mapping
-        the local-tokenizer path relies on; fetches
-        ``tokenizer_config.json`` (+ the standalone ``chat_template.jinja``
-        newer repos ship) from the Hub on first call and caches the result
-        for the lifetime of this backend instance -- success OR graceful
-        failure, mirroring ``_ensure_tokenizer``'s no-respam policy.
+        The ``[providers.NAME.template_repos]`` mapping wins (it exists for
+        models whose TEMPLATE lives in a different repo than a loadable
+        ``tokenizer.json`` -- tiktoken-based Kimi, GGUF-only DeepSeek V4);
+        otherwise the local-tokenizer ``tokenizers`` mapping is reused.
+        Fetched from the Hub on first call and cached for the lifetime of
+        this backend instance -- success OR graceful failure, mirroring
+        ``_ensure_tokenizer``'s no-respam policy.
         """
         if self._chat_template_cache is not None:
             return self._chat_template_cache
-        repo = (self.provider.tokenizers or {}).get(self.model)
+        repo = (self.provider.template_repos or {}).get(self.model) or (
+            self.provider.tokenizers or {}
+        ).get(self.model)
         if not repo:
             info = none_info(note="no HF tokenizer repo mapped for this model")
         else:
             info = fetch_hf_chat_template(repo)
+        info.base_hint = info.base_hint or looks_like_base_model(self.model)
         self._chat_template_cache = info
         return info
 

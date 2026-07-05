@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -63,11 +64,17 @@ class ChatTemplateInfo:
     eos_token: str | None = None
     special_tokens: dict[str, str] = field(default_factory=dict)
     note: str = ""
+    # Name-based base-model signal (see :func:`looks_like_base_model`).
+    # Needed because "no template" alone is NOT a reliable detector:
+    # several vendors (Qwen most prominently) ship a ChatML template in
+    # their BASE-model repos/GGUFs too, purely as a converter artifact.
+    base_hint: bool = False
 
     @property
     def is_base_model(self) -> bool:
-        """No template found (and discovery didn't merely fail)."""
-        return self.template is None and not self.note
+        """No template found (and discovery didn't merely fail), or the
+        model's own name says base (``base_hint``)."""
+        return self.base_hint or (self.template is None and not self.note)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -89,12 +96,37 @@ class ChatTemplateInfo:
             eos_token=d.get("eos_token"),
             special_tokens={str(k): str(v) for k, v in (d.get("special_tokens") or {}).items()},
             note=str(d.get("note", "")),
+            # The wire carries the COMBINED flag; folding it into the hint
+            # keeps the property true through a round-trip (harmless when
+            # the "no template" branch would already be true).
+            base_hint=bool(d.get("is_base_model", False)),
         )
 
 
 def none_info(note: str = "") -> ChatTemplateInfo:
     """The "no template available" shape every degradation path returns."""
     return ChatTemplateInfo(template=None, source="none", note=note)
+
+
+# Name segments that mark a pretraining-only checkpoint. ``pt`` is Gemma's
+# convention (``gemma-2-9b-pt`` vs ``-it``); matched as a WHOLE segment so
+# ``gpt-oss`` / ``prompt`` never trigger it.
+_BASE_NAME_SEGMENTS = frozenset({"base", "pt", "pretrain", "pretrained"})
+
+
+def looks_like_base_model(model_name: str) -> bool:
+    """Heuristic: does the model's own name say "base checkpoint"?
+
+    Splits the identifier (repo id, GGUF filename, provider model id) on
+    the usual delimiters and looks for a ``base``/``pt``/``pretrained``
+    segment -- e.g. ``Qwen3.5-9B-Base-Q4_K_M.gguf`` or
+    ``accounts/fireworks/models/llama-v3p1-8b-base``. This exists because
+    template *absence* is not a reliable base detector: vendors routinely
+    ship a ChatML scaffold in base-model repos and GGUF converters copy it
+    along, so the name is often the only honest signal left.
+    """
+    segments = re.split(r"[-_./\\ ]+", model_name.lower())
+    return any(seg in _BASE_NAME_SEGMENTS for seg in segments)
 
 
 def token_text(value: Any) -> str | None:
@@ -166,41 +198,110 @@ def info_from_tokenizer_config(
 def fetch_hf_chat_template(repo_id: str) -> ChatTemplateInfo:
     """Fetch chat-template metadata for ``repo_id`` from the HuggingFace Hub.
 
-    Looks at ``tokenizer_config.json`` first (the classic home of the
-    ``chat_template`` key + special-token names), then falls back to the
-    standalone ``chat_template.jinja`` file newer repos ship instead.
-    Network / gating failures degrade to :func:`none_info` with the error
-    recorded in ``note`` -- callers cache the result so the Hub is hit at
-    most once per backend instance.
-    """
-    from huggingface_hub import hf_hub_download
+    Discovery chain, in order:
 
-    config: dict[str, Any] = {}
+    1. ``tokenizer_config.json`` -- the classic home of the
+       ``chat_template`` key + special-token names;
+    2. standalone ``chat_template.jinja`` (newer transformers convention;
+       e.g. moonshotai/Kimi repos) or ``chat_template.json``;
+    3. GGUF metadata via the Hub models API -- quantizer repos (e.g.
+       ``bartowski/...-GGUF``) carry the converted template + bos/eos even
+       when the original vendor repo ships none (DeepSeek V4 publishes its
+       chat format only as Python ``encoding/`` code).
+
+    A genuinely absent template (config fetched fine, nothing anywhere)
+    reads as "base model"; network / gating failures degrade to
+    :func:`none_info` with the error recorded in ``note`` -- callers cache
+    the result so the Hub is hit at most once per backend instance.
+    """
+    config, fetch_note = _fetch_tokenizer_config(repo_id)
+    template = template_from_config_value((config or {}).get("chat_template"))
+    if template is None:
+        template = _fetch_standalone_template(repo_id)
+    if template is not None:
+        return info_from_tokenizer_config(config or {}, source="hf_hub", template_override=template)
+
+    gguf_info = _fetch_gguf_template(repo_id)
+    if gguf_info is not None:
+        return gguf_info
+    if fetch_note:
+        return none_info(note=fetch_note)
+    if config is None:
+        return none_info(note="repo ships no tokenizer_config.json or chat_template file")
+    # Config fetched fine and no template exists anywhere: the honest
+    # "this repo was not packaged for chat" answer (keeps the specials).
+    return info_from_tokenizer_config(config, source="hf_hub")
+
+
+def _fetch_tokenizer_config(repo_id: str) -> tuple[dict[str, Any] | None, str]:
+    """``(config, note)`` -- ``config=None`` when the file is absent or
+    unfetchable; ``note`` set only for genuine failures (network, gated
+    repo), NOT for a file that simply doesn't exist (normal for GGUF-only
+    quantizer repos, which the caller probes next)."""
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.utils import EntryNotFoundError
+
     try:
         path = hf_hub_download(repo_id=repo_id, filename="tokenizer_config.json")
-        config = json.loads(Path(path).read_text(encoding="utf-8"))
+        return json.loads(Path(path).read_text(encoding="utf-8")), ""
+    except EntryNotFoundError:
+        return None, ""
     except Exception as exc:
         log.warning("chat-template fetch failed for %s: %s", repo_id, exc)
-        return none_info(note=f"could not fetch tokenizer_config.json ({type(exc).__name__})")
-
-    template_override: str | None = None
-    if not config.get("chat_template"):
-        template_override = _fetch_standalone_template(repo_id)
-    return info_from_tokenizer_config(config, source="hf_hub", template_override=template_override)
+        return None, f"could not fetch tokenizer_config.json ({type(exc).__name__})"
 
 
 def _fetch_standalone_template(repo_id: str) -> str | None:
-    """Best-effort fetch of the standalone ``chat_template.jinja`` file."""
+    """Best-effort fetch of a standalone chat-template file:
+    ``chat_template.jinja`` (raw Jinja) or ``chat_template.json``
+    (``{"chat_template": ...}`` wrapper)."""
     from huggingface_hub import hf_hub_download
 
     try:
         path = hf_hub_download(repo_id=repo_id, filename="chat_template.jinja")
-    except Exception:
+        return Path(path).read_text(encoding="utf-8") or None
+    except Exception as exc:
         # Missing file is the normal case for older repos; genuine network
         # failures were already surfaced by the tokenizer_config fetch.
+        log.debug("no chat_template.jinja in %s: %s", repo_id, exc)
+    try:
+        path = hf_hub_download(repo_id=repo_id, filename="chat_template.json")
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        return template_from_config_value(payload.get("chat_template"))
+    except Exception:
         return None
-    text = Path(path).read_text(encoding="utf-8")
-    return text or None
+
+
+def _fetch_gguf_template(repo_id: str) -> ChatTemplateInfo | None:
+    """Chat template from a GGUF repo's metadata via the Hub models API.
+
+    The Hub parses GGUF headers server-side and exposes
+    ``tokenizer.chat_template`` / bos / eos through
+    ``model_info(..., expand=["gguf"])`` -- no multi-GB download needed.
+    Returns ``None`` when the repo has no GGUF metadata or the API call
+    fails (the caller decides how to degrade).
+    """
+    from huggingface_hub import HfApi
+
+    try:
+        meta = HfApi().model_info(repo_id, expand=["gguf"])
+        gguf: dict[str, Any] = dict(getattr(meta, "gguf", None) or {})
+    except Exception as exc:
+        log.warning("gguf-metadata fetch failed for %s: %s", repo_id, exc)
+        return None
+    template = gguf.get("chat_template")
+    if not isinstance(template, str) or not template:
+        return None
+    bos = token_text(gguf.get("bos_token"))
+    eos = token_text(gguf.get("eos_token"))
+    specials = {k: v for k, v in (("bos_token", bos), ("eos_token", eos)) if v}
+    return ChatTemplateInfo(
+        template=template,
+        source="gguf",
+        bos_token=bos,
+        eos_token=eos,
+        special_tokens=specials,
+    )
 
 
 __all__ = [
@@ -208,6 +309,7 @@ __all__ = [
     "ChatTemplateInfo",
     "fetch_hf_chat_template",
     "info_from_tokenizer_config",
+    "looks_like_base_model",
     "none_info",
     "template_from_config_value",
     "token_text",

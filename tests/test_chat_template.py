@@ -117,19 +117,50 @@ def test_to_dict_from_dict_round_trip() -> None:
 # --------------------------------------------------------------------------- #
 # fetch_hf_chat_template (mocked hub)
 # --------------------------------------------------------------------------- #
-def _write_hub_files(tmp_path, monkeypatch, files: dict[str, str], missing: set[str] = frozenset()):
-    """Patch ``hf_hub_download`` to serve ``files`` from tmp_path."""
+def _write_hub_files(
+    tmp_path,
+    monkeypatch,
+    files: dict[str, str],
+    missing: set[str] = frozenset(),
+    gguf: dict | None = None,
+    absent_files_are_errors: bool = True,
+):
+    """Patch ``hf_hub_download`` (serving ``files`` from tmp_path) and the
+    ``HfApi.model_info`` GGUF-metadata probe (serving ``gguf``, or failing
+    when ``None``) so no test ever touches the network.
+
+    ``absent_files_are_errors``: a file not in ``files`` raises a generic
+    error (network-failure shape) when true, ``EntryNotFoundError`` (the
+    honest "repo has no such file") when false.
+    """
+    from huggingface_hub.utils import EntryNotFoundError
 
     def fake_download(repo_id: str, filename: str) -> str:
         if filename in missing or filename not in files:
-            raise FileNotFoundError(f"{repo_id}/{filename} not found")
+            if absent_files_are_errors and filename == "tokenizer_config.json":
+                raise FileNotFoundError(f"{repo_id}/{filename} not found")
+            raise EntryNotFoundError(f"{repo_id}/{filename} not found")
         p = tmp_path / filename
         p.write_text(files[filename], encoding="utf-8")
         return str(p)
 
+    class _FakeApi:
+        def model_info(self, repo_id: str, expand=None):
+            del expand
+            if gguf is None:
+                raise RuntimeError(f"no gguf metadata for {repo_id}")
+
+            class _Meta:
+                pass
+
+            meta = _Meta()
+            meta.gguf = gguf
+            return meta
+
     import huggingface_hub
 
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeApi)
 
 
 def test_fetch_hf_chat_template_from_tokenizer_config(tmp_path, monkeypatch) -> None:
@@ -176,6 +207,66 @@ def test_fetch_hf_chat_template_network_failure(tmp_path, monkeypatch) -> None:
     assert info.template is None
     assert "could not fetch tokenizer_config.json" in info.note
     assert info.is_base_model is False
+
+
+def test_fetch_hf_chat_template_json_wrapper_fallback(tmp_path, monkeypatch) -> None:
+    """Repos shipping ``chat_template.json`` (no config key, no .jinja)."""
+    _write_hub_files(
+        tmp_path,
+        monkeypatch,
+        {
+            "tokenizer_config.json": json.dumps({"bos_token": "<s>"}),
+            "chat_template.json": json.dumps({"chat_template": "JSON_WRAPPED"}),
+        },
+    )
+    info = ct.fetch_hf_chat_template("org/model")
+    assert info.template == "JSON_WRAPPED"
+    assert info.source == "hf_hub"
+
+
+def test_fetch_hf_chat_template_gguf_metadata_fallback(tmp_path, monkeypatch) -> None:
+    """GGUF-only quantizer repos: no tokenizer_config.json at all, but the
+    Hub API exposes the GGUF header's template + bos/eos (DeepSeek V4)."""
+    _write_hub_files(
+        tmp_path,
+        monkeypatch,
+        {},
+        gguf={
+            "chat_template": "GGUF_TEMPLATE",
+            "bos_token": "<\uff5cbegin\u2581of\u2581sentence\uff5c>",
+            "eos_token": "<\uff5cend\u2581of\u2581sentence\uff5c>",
+        },
+        absent_files_are_errors=False,
+    )
+    info = ct.fetch_hf_chat_template("quantizer/model-GGUF")
+    assert info.template == "GGUF_TEMPLATE"
+    assert info.source == "gguf"
+    assert info.bos_token == "<\uff5cbegin\u2581of\u2581sentence\uff5c>"
+    assert info.is_base_model is False
+
+
+def test_fetch_hf_chat_template_no_files_anywhere(tmp_path, monkeypatch) -> None:
+    """A repo with no tokenizer_config, no template files and no GGUF
+    metadata must degrade with a note -- NOT claim "base model"."""
+    _write_hub_files(tmp_path, monkeypatch, {}, absent_files_are_errors=False)
+    info = ct.fetch_hf_chat_template("org/empty-repo")
+    assert info.template is None
+    assert "no tokenizer_config.json" in info.note
+    assert info.is_base_model is False
+
+
+# --------------------------------------------------------------------------- #
+# looks_like_base_model
+# --------------------------------------------------------------------------- #
+def test_looks_like_base_model_names() -> None:
+    assert ct.looks_like_base_model("Qwen3.5-9B-Base-Q4_K_M.gguf") is True
+    assert ct.looks_like_base_model("accounts/fireworks/models/llama-v3p1-8b-base") is True
+    assert ct.looks_like_base_model("google/gemma-2-9b-pt") is True
+    assert ct.looks_like_base_model("Qwen3.5 9B Base") is True  # GGUF general.name shape
+    assert ct.looks_like_base_model("meta-llama/Llama-3.1-8B-Instruct") is False
+    assert ct.looks_like_base_model("gpt-oss-20b") is False  # "pt" inside a segment
+    assert ct.looks_like_base_model("my-baseline-model") is False  # not a whole segment
+    assert ct.looks_like_base_model("bartowski/DeepSeek-V4-Flash-GGUF") is False
 
 
 # --------------------------------------------------------------------------- #
@@ -228,6 +319,30 @@ def test_openai_compat_unmapped_model_degrades() -> None:
     assert info.is_base_model is False
 
 
+def test_openai_compat_template_repo_wins_over_tokenizer_repo(monkeypatch) -> None:
+    """``template_repos`` exists for models whose template lives in a
+    different repo than the loadable tokenizer.json (Kimi, DeepSeek V4)."""
+    calls: list[str] = []
+
+    def fake_fetch(repo: str) -> ct.ChatTemplateInfo:
+        calls.append(repo)
+        return ct.ChatTemplateInfo(template=CHATML, source="gguf")
+
+    monkeypatch.setattr("dsbx.backends.openai_compat._tokenizer.fetch_hf_chat_template", fake_fetch)
+    backend = OpenAICompatBackend(_provider(template_repos={"test/model": "quantizer/model-GGUF"}))
+    backend._client = MockHTTPClient({})
+    assert backend.chat_template_info().template == CHATML
+    assert calls == ["quantizer/model-GGUF"]
+
+
+def test_openai_compat_base_model_name_hint() -> None:
+    backend = OpenAICompatBackend(_provider(default_model="test/model-base", tokenizers={}))
+    backend._client = MockHTTPClient({})
+    info = backend.chat_template_info()
+    # Name says base AND no repo is mapped: the hint wins, the note stays.
+    assert info.is_base_model is True
+
+
 # --------------------------------------------------------------------------- #
 # HFBackend (object stub -- no torch)
 # --------------------------------------------------------------------------- #
@@ -242,6 +357,7 @@ class _StubHFTokenizer:
 def test_hf_backend_reads_transformers_tokenizer() -> None:
     backend = HFBackend.__new__(HFBackend)
     backend.tokenizer = _StubHFTokenizer()
+    backend.model_id = "org/chat-model"
     info = backend.chat_template_info()
     assert info.template == CHATML
     assert info.source == "transformers"
@@ -256,16 +372,32 @@ def test_hf_backend_base_model() -> None:
     tok = _StubHFTokenizer()
     tok.chat_template = None
     backend.tokenizer = tok
+    backend.model_id = "org/chat-model"
     info = backend.chat_template_info()
     assert info.template is None
     assert info.is_base_model is True
     assert info.eos_token == "<|eot_id|>"
 
 
+def test_hf_backend_base_name_hint_wins_over_shipped_template() -> None:
+    """Qwen-style base repos ship a ChatML template anyway; the repo name
+    is the honest signal and must set ``is_base_model``."""
+    backend = HFBackend.__new__(HFBackend)
+    backend.tokenizer = _StubHFTokenizer()
+    backend.model_id = "Qwen/Qwen3-1.7B-Base"
+    info = backend.chat_template_info()
+    assert info.template == CHATML
+    assert info.is_base_model is True
+
+
 # --------------------------------------------------------------------------- #
 # LlamaCppPyBackend (object stub -- no llama.cpp)
 # --------------------------------------------------------------------------- #
-def _llamacpp_stub(metadata: dict, pieces: dict[int, str]) -> LlamaCppPyBackend:
+def _llamacpp_stub(
+    metadata: dict,
+    pieces: dict[int, str],
+    model_path: str = "/models/SomeChat-7B-Instruct-Q4_K_M.gguf",
+) -> LlamaCppPyBackend:
     backend = LlamaCppPyBackend.__new__(LlamaCppPyBackend)
 
     class _StubLlama:
@@ -280,6 +412,7 @@ def _llamacpp_stub(metadata: dict, pieces: dict[int, str]) -> LlamaCppPyBackend:
     backend._piece_cache = {}
     backend._bos_ids = (1,)
     backend._eos_ids = (2,)
+    backend.model_path = model_path
     return backend
 
 
@@ -300,6 +433,21 @@ def test_llamacpp_py_base_model_gguf() -> None:
     info = backend.chat_template_info()
     assert info.template is None
     assert info.is_base_model is True
+
+
+def test_llamacpp_py_base_filename_hint_wins_over_shipped_template() -> None:
+    """Qwen base GGUFs ship a ChatML template in metadata anyway -- the
+    filename / general.name is the honest base-model signal."""
+    backend = _llamacpp_stub(
+        {"tokenizer.chat_template": CHATML, "general.name": "Qwen3.5 9B Base"},
+        {1: "<|im_start|>", 2: "<|im_end|>"},
+        model_path="/models/Qwen3.5-9B-Base-Q4_K_M.gguf",
+    )
+    info = backend.chat_template_info()
+    assert info.template == CHATML
+    assert info.is_base_model is True
+    # And the flag survives the dsbx-serve wire round-trip.
+    assert ct.ChatTemplateInfo.from_dict(info.to_dict()).is_base_model is True
 
 
 # --------------------------------------------------------------------------- #
