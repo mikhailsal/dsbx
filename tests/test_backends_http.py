@@ -2800,6 +2800,33 @@ def test_stream_native_with_echo_forwards_echo_last(monkeypatch) -> None:
     assert body["echo_last"] == 4
 
 
+def test_echo_start_pos_precomputes_mid_prompt_anchor(monkeypatch) -> None:
+    """``echo_last`` streams anchor at the exact tail offset, not via the
+    first-occurrence ``find`` re-anchor (which mis-anchors when the first
+    echoed token's text repeats earlier in the prompt -- here " the")."""
+    backend, _ = _make_oc_backend(
+        monkeypatch,
+        routes={},
+        has_completions=True,
+        supports_combined_echo_stream=True,
+    )
+    prompt = "the cat sat on the mat"
+    pieces = ["the", " cat", " sat", " on", " the", " mat"]
+    backend._ensure_tokenizer = lambda: object()  # type: ignore[method-assign]
+    backend.tokenize = lambda text: list(range(len(pieces)))  # type: ignore[method-assign]
+    backend.detokenize = lambda ids: "".join(pieces[i] for i in ids)  # type: ignore[method-assign]
+    # Last 2 tokens -> " the mat"; the anchor must be its offset, skipping
+    # the earlier "the" occurrences.
+    assert backend._echo_start_pos(prompt, prompt, 2) == len(prompt) - len(" the mat")
+    # Whole-prompt echo keeps the position-0 anchor.
+    assert backend._echo_start_pos(prompt, prompt, None) == 0
+    # echo_last >= token count degrades to a whole-prompt anchor.
+    assert backend._echo_start_pos(prompt, prompt, 99) == 0
+    # A local/provider tokenization mismatch falls back to the old sync.
+    backend.detokenize = lambda ids: "XYZ"  # type: ignore[method-assign]
+    assert backend._echo_start_pos(prompt, prompt, 2) == 0
+
+
 def test_stream_native_forwards_service_tier_when_supported(monkeypatch) -> None:
     """``service_tier`` flows to the body only when the provider supports it."""
     backend, mock = _make_oc_backend(

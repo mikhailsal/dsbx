@@ -115,6 +115,11 @@ class WireCapabilities(BaseModel):
     # chat-mode simulation path for chat-only providers. See
     # ``Capabilities.supports_chat_stream``.
     supports_chat_stream: bool = False
+    # Sampler names with a native /chat/completions analogue; non-empty
+    # only when ``supports_chat_stream`` is true. The frontend's chat-
+    # mode run buttons gate on this list (single source of truth:
+    # ``dsbx.core.samplers.CHAT_NATIVE_SAMPLERS``).
+    chat_samplers: list[str] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -444,6 +449,7 @@ def capabilities_to_wire(caps) -> WireCapabilities:
         supports_local_tokenize=bool(getattr(caps, "supports_local_tokenize", False)),
         generation_disabled=bool(getattr(caps, "generation_disabled", False)),
         supports_chat_stream=bool(getattr(caps, "supports_chat_stream", False)),
+        chat_samplers=[str(s) for s in getattr(caps, "chat_samplers", ())],
     )
 
 

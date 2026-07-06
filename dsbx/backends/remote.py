@@ -542,6 +542,7 @@ def _capabilities_from_dict(d: dict) -> Capabilities:
         supports_prepend_token_ids=bool(d.get("supports_prepend_token_ids", False)),
         supports_local_tokenize=bool(d.get("supports_local_tokenize", False)),
         supports_chat_stream=bool(d.get("supports_chat_stream", False)),
+        chat_samplers=tuple(str(s) for s in d.get("chat_samplers", [])),
     )
 
 

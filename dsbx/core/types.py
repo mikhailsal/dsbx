@@ -197,6 +197,12 @@ class Capabilities:
     # this False -- their chat mode renders the template client-side and
     # rides the ordinary ``prompt`` path, one source of truth.
     supports_chat_stream: bool = False
+    # Sampler names with a native /chat/completions analogue, populated
+    # (from ``dsbx.core.samplers.CHAT_NATIVE_SAMPLERS``) only when
+    # ``supports_chat_stream`` is true. Surfaced over the wire so the
+    # frontend's chat-mode run buttons gate on the backend's actual
+    # allowlist instead of hard-coding a copy that could drift.
+    chat_samplers: tuple[str, ...] = ()
 
 
 @dataclass

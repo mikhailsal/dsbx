@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/mikhailsal/dsbx/actions/workflows/ci.yml/badge.svg)](https://github.com/mikhailsal/dsbx/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Tests](https://img.shields.io/badge/tests-601%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-605%20passing-brightgreen)
 ![Coverage](https://img.shields.io/badge/coverage-82%25-yellowgreen)
 [![Ruff](https://img.shields.io/badge/lint-ruff-261230)](https://github.com/astral-sh/ruff)
 ![mypy](https://img.shields.io/badge/types-mypy-informational)
@@ -55,7 +55,7 @@ Why build a white-box decoder? This tool solves practical problems for ML engine
 
 The project ships with the quality signals you'd expect of a production-ready, maintained codebase:
 
-* **Testing:** 601 tests written with `pytest` and `pytest-asyncio`, covering 82% of the codebase (line+branch), plus 97 frontend `vitest` tests.
+* **Testing:** 605 tests written with `pytest` and `pytest-asyncio`, covering 82% of the codebase (line+branch), plus 131 frontend `vitest` tests.
 * **Advanced Linting:** `ruff` is configured with an extended, strict rule set including `bugbear` (design), `bandit` (security), and `simplify`.
 * **Async & Storage:** Uses `FastAPI`, `SQLAlchemy 2.0`, and `aiosqlite` for high-performance asynchronous upstream request logging.
 * **Future Work:** AST-based code-size limits (`scripts/check_code_limits.py`) to enforce file-size ceilings and function-length advisories automatically.

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from dsbx.web.schemas import GenerateRequest
 
@@ -53,14 +53,25 @@ class ChatMessage(BaseModel):
     ``tool_calls``; ``tool_call_id`` marks a ``role="tool"`` result
     message. The shapes are forwarded to the provider verbatim -- the
     sandbox deliberately does NOT normalize them, because seeing exactly
-    what the provider accepts/rejects is part of the lesson.
+    what the provider accepts/rejects is part of the lesson. Pydantic's
+    default is ``extra="ignore"``, which would silently STRIP any key
+    not declared here (it once ate ``reasoning_content``); ``extra=
+    "allow"`` keeps the verbatim promise honest for future family-
+    specific fields too.
     """
+
+    model_config = ConfigDict(extra="allow")
 
     role: str
     content: str | None = None
     name: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
+    # Reasoning/thinking text attached to an assistant message (the key
+    # Qwen/DeepSeek-style providers consume). Declared explicitly --
+    # rather than riding ``extra`` -- so the field is documented and
+    # survives ``model_dump(exclude_none=True)`` by contract.
+    reasoning_content: str | None = None
 
 
 class ChatGenerateRequest(GenerateRequest):

@@ -21,28 +21,17 @@ import type {
 } from './types';
 
 /**
- * Generic ChatML scaffold offered when the model ships no template.
- * Explicitly labeled in the UI as a fallback: a base model was not trained
- * on ANY chat format, so this is a "what if" scaffold for experimentation,
- * not a claim about the model. Mirrors ``FALLBACK_CHATML_TEMPLATE`` in
- * ``dsbx/core/chat_template.py`` (the backend serves it too, so the two
- * stay in sync via the template endpoint's ``fallback_template`` field).
- */
-export const FALLBACK_CHATML_TEMPLATE =
-  "{% for message in messages %}" +
-  "{{ '<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>' + '\\n' }}" +
-  "{% endfor %}" +
-  "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}";
-
-/**
  * Fold the block list into OpenAI-shaped messages.
  *
  * Adjacency rules (the interesting part):
  * - ``assistant_reasoning`` attaches to the NEXT ``assistant`` block as its
  *   ``reasoning_content`` (the key Qwen3/DeepSeek templates consume); a
  *   trailing reasoning block becomes an assistant message of its own.
- * - consecutive ``tool_call`` blocks merge into ONE assistant message with a
- *   ``tool_calls`` array (matching how models emit parallel calls).
+ * - a ``tool_call`` block merges into the immediately preceding ASSISTANT
+ *   message (models emit text + tool calls as ONE message; splitting them
+ *   would make templates render two separate turns), and consecutive
+ *   ``tool_call`` blocks merge into one ``tool_calls`` array (parallel
+ *   calls).
  * - ``tool_defs`` contributes to ``tools``, not to ``messages``.
  */
 export function blocksToMessages(blocks: ChatBlock[]): {
@@ -96,17 +85,23 @@ export function blocksToMessages(blocks: ChatBlock[]): {
         break;
       }
       case 'tool_call': {
-        flushReasoning();
         const call: ToolCallPayload = {
           id: block.callId || `call_${++callSeq}`,
           type: 'function',
           function: { name: block.name, arguments: block.argumentsJson }
         };
         const prev = messages[messages.length - 1];
-        if (prev && prev.role === 'assistant' && Array.isArray(prev.tool_calls)) {
-          prev.tool_calls.push(call);
+        if (pendingReasoning === null && prev && prev.role === 'assistant') {
+          prev.tool_calls = [...(prev.tool_calls ?? []), call];
         } else {
-          messages.push({ role: 'assistant', content: null, tool_calls: [call] });
+          // A pending reasoning block attaches here the same way it
+          // would to an assistant text block: think -> call the tool.
+          const msg: ChatMessage = { role: 'assistant', content: null, tool_calls: [call] };
+          if (pendingReasoning !== null) {
+            msg.reasoning_content = pendingReasoning;
+            pendingReasoning = null;
+          }
+          messages.push(msg);
         }
         break;
       }
@@ -140,11 +135,18 @@ function parseJsonArray(text: string): {
 }
 
 /**
- * Render a ``ChatDoc`` through the model's template (or the ChatML
- * fallback when the model ships none). Never throws: template execution
- * failures -- including deliberate ``raise_exception`` calls like Gemma's
- * "System role not supported" -- land in ``error`` with ``raw = ''`` so
- * the UI can show the template's own complaint verbatim.
+ * Render a ``ChatDoc`` through the model's template. Never throws:
+ * template execution failures -- including deliberate
+ * ``raise_exception`` calls like Gemma's "System role not supported" --
+ * land in ``error`` with ``raw = ''`` so the UI can show the template's
+ * own complaint verbatim.
+ *
+ * Base models reach this function with the server-provided ChatML
+ * fallback already substituted into ``inputs.template`` (see
+ * ``templateInputsOf``); the single source of that fallback is
+ * ``FALLBACK_CHATML_TEMPLATE`` in ``dsbx/core/chat_template.py``. A
+ * ``null`` template is therefore a caller bug and reads as an error,
+ * not a silent local fallback.
  *
  * ``@huggingface/jinja`` ships the HF-specific globals itself
  * (``raise_exception``, ``strftime_now`` for gpt-oss date stamping), so
@@ -156,11 +158,16 @@ export function renderChat(
   assistantPrefix: string | null = null
 ): RenderResult {
   const { messages, tools, warnings } = blocksToMessages(doc.blocks);
-  const usedFallback = !inputs.template;
-  if (usedFallback) {
-    warnings.push('model ships no chat template; using the generic ChatML fallback.');
+  const source = inputs.template;
+  if (!source) {
+    return {
+      raw: '',
+      messages,
+      tools,
+      warnings,
+      error: 'no chat template available (the server did not supply a fallback)'
+    };
   }
-  const source = inputs.template ?? FALLBACK_CHATML_TEMPLATE;
   const prefill = prefillContent(doc, warnings);
   // When the profile knows the assistant turn opener, an open turn is
   // rendered as ``prefix + content`` -- so any scaffold the generation
@@ -197,7 +204,7 @@ export function renderChat(
   } catch (e) {
     error = e instanceof Error ? e.message : String(e);
   }
-  return { raw, messages, tools, usedFallback, warnings, error };
+  return { raw, messages, tools, warnings, error };
 }
 
 /**

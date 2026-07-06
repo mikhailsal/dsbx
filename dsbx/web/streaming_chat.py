@@ -60,18 +60,30 @@ def chat_stream_response(
         if not req.messages:
             raise HTTPException(status_code=400, detail="messages must be a non-empty list.")
         if not backend.supports_chat_sampler(sampler_name):  # type: ignore[attr-defined]
+            allowed = ", ".join(getattr(caps, "chat_samplers", ())) or "greedy"
             raise HTTPException(
                 status_code=400,
                 detail=(
                     f"sampler {sampler_name!r} cannot run server-side on a "
                     "chat-only provider (no /chat/completions analogue); "
-                    "use greedy, temperature, or top_p in simulation mode."
+                    f"use one of: {allowed} in simulation mode."
                 ),
             )
 
     def _body() -> Iterator[bytes]:
-        with use_backend(registry, req.backend, model=req.model) as backend:
-            yield from _stream_chat_frames(backend, req, sampler_name, sampler_params)
+        # Re-acquiring the backend can fail even though the validation
+        # pass above succeeded (a concurrent model unload / registry
+        # change between the two lock windows). At this point the 200
+        # header is already on the wire, so raising would just drop the
+        # connection mid-SSE -- surface the failure through the same
+        # terminating ``done`` frame contract errors inside the stream
+        # use.
+        try:
+            with use_backend(registry, req.backend, model=req.model) as backend:
+                yield from _stream_chat_frames(backend, req, sampler_name, sampler_params)
+        except HTTPException as exc:
+            log.warning("dsbx-web: chat stream lost its backend: %s", exc.detail)
+            yield sse_frame({"event": "done", "stop_reason": None, "error": str(exc.detail)})
 
     return StreamingResponse(
         _body(),

@@ -524,5 +524,24 @@ def test_fallback_chatml_template_mentions_roles() -> None:
     assert "add_generation_prompt" in ct.FALLBACK_CHATML_TEMPLATE
 
 
+def test_fallback_chatml_template_golden_source() -> None:
+    """Pin the fallback template source byte-for-byte.
+
+    This constant is the SINGLE source of the ChatML fallback: the
+    frontend receives it over the wire (``fallback_template``) and pins
+    its rendered output in
+    ``frontend/src/lib/chat/__tests__/render.test.ts``. Any edit here
+    must update that golden render too -- this pin makes the coupling
+    loud instead of silent.
+    """
+    assert ct.FALLBACK_CHATML_TEMPLATE == (
+        "{% for message in messages %}"
+        "{{ '<|im_start|>' + message['role'] + '\n' + message['content'] "
+        "+ '<|im_end|>' + '\n' }}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])

@@ -10,7 +10,7 @@
  */
 
 /** One editable card in the block editor. */
-export type ChatBlock =
+export type ChatBlock = (
   | { kind: 'system'; content: string }
   | { kind: 'user'; content: string }
   /**
@@ -39,7 +39,35 @@ export type ChatBlock =
   /** A native tool invocation authored on behalf of the assistant. */
   | { kind: 'tool_call'; name: string; argumentsJson: string; callId?: string }
   /** The tool's reply, fed back to the model as a ``role: tool`` message. */
-  | { kind: 'tool_result'; content: string; name?: string; callId?: string };
+  | { kind: 'tool_result'; content: string; name?: string; callId?: string }
+) & {
+  /**
+   * Stable identity for keyed list rendering: without it the block
+   * editor keys cards by index, so removing block 0 re-mounts every
+   * card below it (focus loss, textarea state reset). Assigned by
+   * ``freshBlockId`` at UI creation sites; blocks produced by the raw
+   * parser may omit it (the list falls back to index keys for those).
+   */
+  id?: string;
+};
+
+let blockSeq = 0;
+
+/** A session-unique id for a newly created ``ChatBlock``. */
+export function freshBlockId(): string {
+  return `blk_${++blockSeq}`;
+}
+
+/** Fill in missing block ids (keeps existing ones) so the block editor
+ * can key its cards stably. Applied wherever a doc is adopted wholesale
+ * (initial state, raw-parse results, appended assistant turns). */
+export function withBlockIds(doc: ChatDoc): ChatDoc {
+  if (doc.blocks.every((b) => b.id)) return doc;
+  return {
+    ...doc,
+    blocks: doc.blocks.map((b) => (b.id ? b : { ...b, id: freshBlockId() }))
+  };
+}
 
 export type ChatBlockKind = ChatBlock['kind'];
 
@@ -130,8 +158,6 @@ export interface RenderResult {
   messages: ChatMessage[];
   /** Parsed tool catalogue (from ``tool_defs``), or null. */
   tools: Record<string, unknown>[] | null;
-  /** True when no model template existed and the ChatML fallback ran. */
-  usedFallback: boolean;
   warnings: string[];
   /** Template execution failure (e.g. Gemma's "System role not
    * supported" raise_exception), verbatim from the Jinja engine.

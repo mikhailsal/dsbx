@@ -26,6 +26,7 @@ from dsbx.core import usage as usage_mod
 from dsbx.core.backend import Backend
 from dsbx.core.chat_template import ChatTemplateInfo
 from dsbx.core.config import ProviderConfig
+from dsbx.core.samplers import CHAT_NATIVE_SAMPLERS
 from dsbx.core.types import Capabilities, StepResult, TokenCandidate
 
 if TYPE_CHECKING:
@@ -272,6 +273,7 @@ class OpenAICompatBackend(
             # simulation path. Template-capable providers keep this off
             # (their chat mode renders client-side onto the prompt path).
             supports_chat_stream=is_chat_only,
+            chat_samplers=tuple(sorted(CHAT_NATIVE_SAMPLERS)) if is_chat_only else (),
             # Populated from the local HF tokenizer's special-tokens
             # table when available; empty otherwise. Empty means the
             # UI's "fill BOS" helper greys out (and we'd fall back to

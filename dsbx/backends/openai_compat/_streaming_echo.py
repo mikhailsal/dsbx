@@ -61,6 +61,37 @@ class _EchoStreamingMixin:
         def detokenize(self, token_ids: list[int]) -> str: ...
         def piece(self, token_id: int) -> str: ...
 
+    def _echo_start_pos(
+        self, expected: str, prompt_payload: str | list[int], echo_last: Any
+    ) -> int:
+        """Character offset in ``expected`` where the echo stream begins.
+
+        ``0`` for a whole-prompt echo. An ``echo_last=N`` stream starts at
+        the last N tokens of the prompt; with a local tokenizer we compute
+        that offset exactly instead of leaving ``_echo_match_advance`` to
+        re-anchor the first token via ``find`` -- which picks the FIRST
+        occurrence and mis-anchors when the token's text repeats earlier
+        in the prompt, potentially misclassifying the echo/emit boundary.
+        Falls back to ``0`` (the old find-based sync) whenever the local
+        view doesn't line up (no tokenizer, tokenization mismatch).
+        """
+        if not echo_last:
+            return 0
+        n = int(echo_last)
+        if self._ensure_tokenizer() is None:
+            return 0
+        ids = (
+            [int(t) for t in prompt_payload]
+            if isinstance(prompt_payload, list)
+            else self.tokenize(prompt_payload)
+        )
+        if n <= 0 or n >= len(ids):
+            return 0
+        tail = self.detokenize(ids[-n:])
+        if tail and expected.endswith(tail):
+            return len(expected) - len(tail)
+        return 0
+
     def _echo_match_advance(
         self, expected: str, match_pos: int, token_id: int | None, text: str
     ) -> int | None:
@@ -75,10 +106,11 @@ class _EchoStreamingMixin:
         resolved via ``_surface_text`` and matched literally (DeepSeek's
         BOS advances the cursor by its 22-char literal); without one the
         blank stays an echo with the cursor parked, and the NEXT
-        non-blank token re-anchors via ``find`` (also how ``echo_last``
-        streams, which start mid-prompt, sync up). A blank whose
-        resolved piece is NOT in the prompt is a server-side prepend
-        (Fireworks auto-BOS) -- still echo, cursor unchanged.
+        non-blank token re-anchors via ``find`` (also the fallback sync
+        for ``echo_last`` streams when :meth:`_echo_start_pos` couldn't
+        precompute the mid-prompt start). A blank whose resolved piece
+        is NOT in the prompt is a server-side prepend (Fireworks
+        auto-BOS) -- still echo, cursor unchanged.
         """
         if match_pos >= len(expected):
             return None
@@ -287,7 +319,7 @@ class _EchoStreamingMixin:
             if isinstance(prompt_payload, str)
             else self.detokenize([int(t) for t in prompt_payload])
         )
-        echo_match_pos = 0
+        echo_match_pos = self._echo_start_pos(echo_expect, prompt_payload, body.get("echo_last"))
         tokens_before: list[int] = self.tokenize(prompt)
         echo_pos_idx = 0
         emit_step_idx = 0

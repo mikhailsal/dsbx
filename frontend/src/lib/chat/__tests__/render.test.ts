@@ -9,7 +9,8 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { FALLBACK_CHATML_TEMPLATE, blocksToMessages, renderChat } from '../render';
+import { blocksToMessages, renderChat } from '../render';
+import { templateInputsOf } from '../template';
 import type { ChatBlock, ChatDoc, TemplateInputs } from '../types';
 import fixtures from '../fixtures/templates.json';
 
@@ -45,7 +46,6 @@ describe('renderChat against transformers ground truth', () => {
       const result = renderChat(docOf(key), inputsOf(key));
       expect(result.error).toBeNull();
       expect(result.raw).toBe(fixtures[key].expected.rendered);
-      expect(result.usedFallback).toBe(false);
     });
   }
 
@@ -62,22 +62,47 @@ describe('renderChat against transformers ground truth', () => {
     expect(result.error).toContain('System role not supported');
   });
 
-  it('falls back to ChatML when the model ships no template', () => {
+  it('renders base models through the server-provided ChatML fallback', () => {
+    // The single source of the fallback is FALLBACK_CHATML_TEMPLATE in
+    // dsbx/core/chat_template.py, served on the template endpoint's
+    // ``fallback_template`` field; templateInputsOf substitutes it when
+    // the model ships no template of its own.
+    const serverFallback =
+      "{% for message in messages %}" +
+      "{{ '<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>' + '\\n' }}" +
+      "{% endfor %}" +
+      "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}";
+    const inputs = templateInputsOf({
+      backend: 'b',
+      model: null,
+      template: null,
+      source: 'none',
+      bos_token: null,
+      eos_token: null,
+      special_tokens: {},
+      note: '',
+      is_base_model: true,
+      fallback_template: serverFallback
+    });
+    expect(inputs.template).toBe(serverFallback);
+    const doc: ChatDoc = {
+      blocks: [{ kind: 'user', content: 'hi' }],
+      addGenerationPrompt: true
+    };
+    const result = renderChat(doc, inputs);
+    expect(result.error).toBeNull();
+    expect(result.raw).toBe('<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n');
+  });
+
+  it('reports an error (not a silent local fallback) when no template reaches it', () => {
     const doc: ChatDoc = {
       blocks: [{ kind: 'user', content: 'hi' }],
       addGenerationPrompt: true
     };
     const result = renderChat(doc, { template: null, bosToken: null, eosToken: null });
-    expect(result.usedFallback).toBe(true);
-    expect(result.raw).toBe('<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n');
-    expect(result.warnings.join(' ')).toContain('fallback');
-  });
-
-  it('keeps the fallback template in sync with the backend constant shape', () => {
-    // The Python twin lives in dsbx/core/chat_template.py; both must produce
-    // the same ChatML scaffold. Guard the structural markers.
-    expect(FALLBACK_CHATML_TEMPLATE).toContain('<|im_start|>');
-    expect(FALLBACK_CHATML_TEMPLATE).toContain('add_generation_prompt');
+    expect(result.raw).toBe('');
+    expect(result.error).toContain('no chat template available');
+    expect(result.messages).toHaveLength(1);
   });
 });
 
@@ -197,6 +222,36 @@ describe('blocksToMessages', () => {
       name: 'get_weather',
       tool_call_id: 'call_1'
     });
+  });
+
+  it('merges a tool call into the preceding assistant TEXT message', () => {
+    // Models emit "text + tool calls" as one assistant message; splitting
+    // them would make templates render two separate turns.
+    const { messages } = blocksToMessages([
+      { kind: 'user', content: 'weather?' },
+      { kind: 'assistant', content: 'Let me check.' },
+      { kind: 'tool_call', name: 'get_weather', argumentsJson: '{"city": "Paris"}' }
+    ]);
+    expect(messages).toHaveLength(2);
+    expect(messages[1].role).toBe('assistant');
+    expect(messages[1].content).toBe('Let me check.');
+    expect(messages[1].tool_calls).toHaveLength(1);
+  });
+
+  it('attaches a pending reasoning block to a tool-call message without a warning', () => {
+    const { messages, warnings } = blocksToMessages([
+      { kind: 'user', content: 'weather?' },
+      { kind: 'assistant_reasoning', content: 'need the tool' },
+      { kind: 'tool_call', name: 'get_weather', argumentsJson: '{}' }
+    ]);
+    expect(warnings).toEqual([]);
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toMatchObject({
+      role: 'assistant',
+      content: null,
+      reasoning_content: 'need the tool'
+    });
+    expect(messages[1].tool_calls).toHaveLength(1);
   });
 
   it('collects tool definitions into tools, not messages', () => {

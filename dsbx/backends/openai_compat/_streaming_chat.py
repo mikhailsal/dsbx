@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from dsbx.core import usage as usage_mod
 from dsbx.core.engine import GenStep
+from dsbx.core.samplers import CHAT_NATIVE_SAMPLERS
 
 if TYPE_CHECKING:
     import httpx
@@ -28,12 +29,6 @@ if TYPE_CHECKING:
     from dsbx.core.types import TokenCandidate
 
 log = logging.getLogger(__name__)
-
-# Samplers with a clean /chat/completions analogue. Everything else gets
-# a loud NotImplementedError: the chat API has no top_k/min_p/typical/
-# mirostat knobs we can trust across providers, and silently degrading a
-# sampler would defeat the sandbox's "show the truth" mission.
-_CHAT_NATIVE_SAMPLERS = frozenset({"greedy", "temperature", "top_p"})
 
 # Emit-record shape shared with ``_genstep_from_emit_record``:
 # ``(token_id_or_None, text, logprob, top_payload, sampling_mask_count)``.
@@ -130,7 +125,7 @@ class _ChatStreamingMixin:
 
     def supports_chat_sampler(self, sampler_name: str) -> bool:
         """Can ``sampler_name`` run server-side on /chat/completions?"""
-        return sampler_name in _CHAT_NATIVE_SAMPLERS
+        return sampler_name in CHAT_NATIVE_SAMPLERS
 
     def stream_chat_native(
         self,
@@ -164,11 +159,11 @@ class _ChatStreamingMixin:
         stay meaningful; multi-token or unmapped texts fall back to
         synthetic interned ids, same as the legacy /completions parser.
         """
-        if sampler_name not in _CHAT_NATIVE_SAMPLERS:
+        if sampler_name not in CHAT_NATIVE_SAMPLERS:
             raise NotImplementedError(
                 f"sampler {sampler_name!r} has no /chat/completions analogue "
                 f"on {self.provider.name!r}; chat simulation mode supports "
-                f"{sorted(_CHAT_NATIVE_SAMPLERS)} only."
+                f"{sorted(CHAT_NATIVE_SAMPLERS)} only."
             )
         top = max(1, min(top_k, self.provider.max_top_logprobs))
         body: dict[str, Any] = {

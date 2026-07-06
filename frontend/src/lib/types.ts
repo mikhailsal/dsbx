@@ -91,6 +91,13 @@ export interface Capabilities {
    * receive the chat template rendered client-side as ``prompt``.
    */
   supports_chat_stream: boolean;
+  /**
+   * Sampler names with a native /chat/completions analogue; non-empty
+   * only when ``supports_chat_stream`` is true. The chat-mode run
+   * buttons gate on this list (single source of truth lives in
+   * ``dsbx.core.samplers.CHAT_NATIVE_SAMPLERS`` on the backend).
+   */
+  chat_samplers: string[];
 }
 
 /**

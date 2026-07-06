@@ -113,12 +113,62 @@ def test_chat_stream_forwards_tools_and_stop_texts() -> None:
     assert call["stop_texts"] == ["END"]
 
 
+def test_chat_stream_forwards_reasoning_content_verbatim() -> None:
+    """Regression: pydantic's default ``extra="ignore"`` silently stripped
+    ``reasoning_content`` (and any other undeclared key) from messages
+    before they reached the provider, contradicting the schema's
+    "forwarded verbatim" contract."""
+    client, backends = _make_client()
+    msgs = [
+        {"role": "user", "content": "q"},
+        {
+            "role": "assistant",
+            "content": "a",
+            "reasoning_content": "let me think",
+            # Undeclared family-specific extras must survive too.
+            "custom_vendor_field": "kept",
+        },
+        {"role": "user", "content": "and?"},
+    ]
+    r = _request(client, messages=msgs)
+    assert r.status_code == 200
+    sent = backends["chatprov"].chat_calls[0]["messages"]
+    assert sent[1]["reasoning_content"] == "let me think"
+    assert sent[1]["custom_vendor_field"] == "kept"
+
+
 def test_chat_stream_resolves_watches() -> None:
     chat = ChatFakeBackend(name="chatprov", tokens={"Hi": [500]}, eos_token_ids=(99,))
     client, _ = _make_client(chat_backend=chat)
     r = _request(client, watch_texts=["Hi"], watch_ids=[7], watch_eos=True)
     assert r.status_code == 200
     assert chat.chat_calls[0]["watch_ids"] == [500, 7, 99]
+
+
+def test_backend_lost_between_validation_and_stream(monkeypatch) -> None:
+    """A backend that validates fine but disappears before the SSE body
+    re-acquires it must still terminate with a ``done`` error frame (the
+    200 header is already committed; raising would drop the connection)."""
+    from fastapi import HTTPException
+
+    from dsbx.web import streaming_chat as sc
+
+    real_use = sc.use_backend
+    calls = {"n": 0}
+
+    def flaky_use(registry, name, model=None):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise HTTPException(status_code=400, detail="backend vanished mid-request")
+        return real_use(registry, name, model=model)
+
+    monkeypatch.setattr(sc, "use_backend", flaky_use)
+    client, _ = _make_client()
+    r = _request(client)
+    assert r.status_code == 200
+    events = _parse_sse(r.text)
+    assert events[-1]["event"] == "done"
+    assert "backend vanished" in events[-1]["error"]
 
 
 def test_chat_stream_error_lands_in_done_frame() -> None:

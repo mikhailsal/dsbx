@@ -97,8 +97,13 @@
       if ((err as Error).name === 'AbortError') return;
       tokError = tokenizeErrorText(err);
     } finally {
-      if (abortCtrl === ctrl) abortCtrl = null;
-      busy = false;
+      // Only the run that still OWNS the controller may clear the busy
+      // flag: an aborted run's finally would otherwise blank the spinner
+      // while its successor is still in flight.
+      if (abortCtrl === ctrl) {
+        abortCtrl = null;
+        busy = false;
+      }
     }
   }
 

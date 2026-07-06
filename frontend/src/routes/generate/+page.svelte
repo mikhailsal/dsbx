@@ -496,11 +496,10 @@
   );
   // On the /chat/completions path only samplers with a native analogue
   // can run server-side; anything else would silently degrade, so the
-  // run buttons gate on it honestly instead.
+  // run buttons gate on the backend-supplied allowlist honestly.
+  let chatSamplers = $derived<string[]>(activeCaps?.chat_samplers ?? []);
   let chatSamplerUnsupported = $derived<boolean>(
-    composerMode === 'chat' &&
-      chatSimulation &&
-      !['greedy', 'temperature', 'top_p'].includes(sampler)
+    composerMode === 'chat' && chatSimulation && !chatSamplers.includes(sampler)
   );
   // What the run buttons check per mode: text mode needs a prompt and a
   // /completions-capable backend; chat mode needs a runnable composer
@@ -513,7 +512,7 @@
       : generationDisabled && !supportsChatStream
         ? generationDisabledNote || 'this backend can run neither raw prompts nor chat messages'
         : chatSamplerUnsupported
-          ? `sampler "${sampler}" has no /chat/completions analogue on this provider — use greedy, temperature, or top_p in simulation mode`
+          ? `sampler "${sampler}" has no /chat/completions analogue on this provider — use ${chatSamplers.join(', ') || 'greedy'} in simulation mode`
           : !chatReady
             ? 'the chat composer has nothing runnable yet — add a message (or fix the template error shown above)'
             : ''
@@ -1424,6 +1423,7 @@
           model={model}
           simulation={chatSimulation}
           tokenizeSupported={localTokenizeSupported}
+          loadedModel={backendInfo?.loaded_model ?? null}
           disabled={busy}
           bind:prompt={chatPrompt}
           bind:messages={chatMessages}

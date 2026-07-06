@@ -47,8 +47,17 @@ def make_chat_router(
         backend: str = Query(..., description="backend name from /api/v1/info"),
         model: str | None = Query(None, description="model override (cloud providers)"),
     ) -> ChatTemplateResponse:
+        # Resolve/load the backend under its lock, but run the actual
+        # template discovery OUTSIDE it: for cloud/remote backends the
+        # discovery can hit the network (HF Hub / the remote host) and
+        # holding the per-backend lock for that long would block every
+        # concurrent generate request on the same backend. The method is
+        # read-only apart from an idempotent internal cache write; the
+        # worst race (a model swap mid-fetch) returns metadata the
+        # frontend's freshness key immediately refetches.
         with use_backend(registry, backend, model=model) as be:
-            info = be.chat_template_info()
+            backend_obj = be
+        info = backend_obj.chat_template_info()
         return ChatTemplateResponse(
             backend=backend,
             model=model,

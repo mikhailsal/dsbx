@@ -5,6 +5,7 @@
    * template rendering happens in the composer above.
    */
   import ChatBlockCard from './ChatBlockCard.svelte';
+  import { freshBlockId } from '$lib/chat/types';
   import type { ChatBlock, ChatBlockKind, ChatDoc, TemplateProfile } from '$lib/chat/types';
 
   interface Props {
@@ -28,19 +29,21 @@
   }: Props = $props();
 
   function newBlock(kind: ChatBlockKind): ChatBlock {
+    const id = freshBlockId();
     switch (kind) {
       case 'tool_defs':
         return {
           kind,
+          id,
           toolsJson:
             '[\n  {"type": "function", "function": {"name": "get_weather", "description": "", "parameters": {"type": "object", "properties": {}}}}\n]'
         };
       case 'tool_call':
-        return { kind, name: '', argumentsJson: '{}' };
+        return { kind, id, name: '', argumentsJson: '{}' };
       case 'tool_result':
-        return { kind, content: '' };
+        return { kind, id, content: '' };
       default:
-        return { kind, content: '' };
+        return { kind, id, content: '' };
     }
   }
 
@@ -91,7 +94,10 @@
       No blocks yet — add a system prompt or a user message below.
     </p>
   {/if}
-  {#each doc.blocks as block, i (i)}
+  <!-- Keyed by the block's stable id when it has one (index keying would
+       re-mount every card below a removal); parser-produced blocks
+       without ids fall back to a namespaced index key. -->
+  {#each doc.blocks as block, i (block.id ?? `i:${i}`)}
     <ChatBlockCard
       {block}
       index={i}

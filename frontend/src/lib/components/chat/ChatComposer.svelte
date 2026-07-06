@@ -28,6 +28,7 @@
   import { renderChat } from '$lib/chat/render';
   import { parseRaw } from '$lib/chat/parse';
   import { buildSnippets } from '$lib/chat/snippets';
+  import { withBlockIds } from '$lib/chat/types';
   import type { ChatDoc, ChatMessage, ParseError } from '$lib/chat/types';
   import type { ChatTemplateResponse } from '$lib/types';
 
@@ -38,6 +39,10 @@
     simulation: boolean;
     /** Backend has a real local tokenizer -> token-boundary highlighting. */
     tokenizeSupported: boolean;
+    /** The backend's currently-loaded model (remote / local backends can
+     * swap it while ``model`` stays constant); used purely as a template
+     * cache-freshness key so a swap triggers a refetch. */
+    loadedModel?: string | null;
     disabled?: boolean;
     /** Rendered raw prompt (bindable output; template-capable path). */
     prompt: string;
@@ -52,6 +57,7 @@
     model,
     simulation,
     tokenizeSupported,
+    loadedModel = null,
     disabled = false,
     prompt = $bindable(),
     messages = $bindable(),
@@ -65,25 +71,28 @@
   let rawText = $state('');
   let parseError = $state<ParseError | null>(null);
   let parseWarnings = $state<string[]>([]);
-  let doc = $state<ChatDoc>({
-    blocks: [{ kind: 'user', content: 'What is the capital of France?' }],
-    addGenerationPrompt: true
-  });
+  let doc = $state<ChatDoc>(
+    withBlockIds({
+      blocks: [{ kind: 'user', content: 'What is the capital of France?' }],
+      addGenerationPrompt: true
+    })
+  );
 
-  // ---- template discovery (cached per backend+model) ------------------- //
+  // ---- template discovery (cached per backend+model+loaded model) ------ //
   $effect(() => {
     const b = backend;
     const m = model;
+    const lm = loadedModel ?? '';
     if (!b) return;
     info = null;
     fetchError = '';
-    fetchChatTemplate(b, m || null).then(
+    fetchChatTemplate(b, m || null, lm).then(
       (res) => {
         // Ignore stale responses after a backend/model switch.
-        if (backend === b && model === m) info = res;
+        if (backend === b && model === m && (loadedModel ?? '') === lm) info = res;
       },
       (e: unknown) => {
-        if (backend === b && model === m) {
+        if (backend === b && model === m && (loadedModel ?? '') === lm) {
           fetchError = e instanceof Error ? e.message : String(e);
         }
       }
@@ -141,7 +150,7 @@
       parseError = result.error;
       return; // stay in raw; the editor shows the positioned error + escape
     }
-    doc = result.doc;
+    doc = withBlockIds(result.doc);
     parseError = null;
     parseWarnings = result.warnings;
     subMode = 'blocks';
@@ -159,7 +168,7 @@
   /** Nuke the whole conversation back to a fresh user turn. */
   function resetConversation(): void {
     if (!window.confirm('Reset the conversation? All blocks and raw edits are discarded.')) return;
-    doc = { blocks: [{ kind: 'user', content: '' }], addGenerationPrompt: true };
+    doc = withBlockIds({ blocks: [{ kind: 'user', content: '' }], addGenerationPrompt: true });
     rawText = '';
     parseError = null;
     parseWarnings = [];
@@ -180,7 +189,7 @@
       rawText = rawText + text;
       return;
     }
-    doc = appendAssistantText(doc, text, finished, profile, inputs?.eosToken ?? null);
+    doc = withBlockIds(appendAssistantText(doc, text, finished, profile, inputs?.eosToken ?? null));
   }
 
   // Reset conversation state when the backend/model changes enough that
