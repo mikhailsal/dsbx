@@ -84,6 +84,28 @@ const FAMILIES: Record<Exclude<TemplateFamily, 'unknown'>, FamilySpec> = {
   }
 };
 
+/**
+ * The two strings the open-turn (prefill) machinery needs from a profile:
+ * ``prefix`` is the assistant turn opener the renderer appends before the
+ * verbatim open-turn content; ``scaffold`` is whatever EXTRA text the
+ * generation prompt carries beyond that opener (e.g. Qwen3.5's forced
+ * "<think>\n"), which "append as assistant" folds into the block content
+ * so the student sees the full open-turn text, tags included.
+ *
+ * Null when the profile cannot support the split (incomplete derivation,
+ * or a generation prompt that does not start with the assistant prefix,
+ * e.g. Harmony's channel-scoped openers) -- callers then fall back to the
+ * ``generation prompt + content`` rendering.
+ */
+export function prefillMarkers(
+  profile: TemplateProfile | null
+): { prefix: string; scaffold: string } | null {
+  if (!profile?.complete) return null;
+  const prefix = profile.roles.assistant?.prefix ?? '';
+  if (!prefix || !profile.generationPrompt.startsWith(prefix)) return null;
+  return { prefix, scaffold: profile.generationPrompt.slice(prefix.length) };
+}
+
 export function detectFamily(template: string): TemplateFamily {
   const entries = Object.entries(FAMILIES) as [keyof typeof FAMILIES, FamilySpec][];
   for (const [family, spec] of entries) {

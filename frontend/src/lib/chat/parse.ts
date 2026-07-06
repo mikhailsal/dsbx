@@ -138,12 +138,15 @@ export function parseRaw(raw: string, profile: TemplateProfile): ParseResult {
     const suffixAt = entry.suffix ? raw.indexOf(entry.suffix, contentStart) : -1;
     if (suffixAt === -1) {
       // Unterminated final turn -- normal when the user is mid-edit or
-      // prefilling; keep it as the last block, flagged as an open turn so
-      // re-rendering does NOT close it (blocks <-> raw stays lossless).
-      appendRoleContent(blocks, warnings, profile, entry.role, raw.slice(contentStart));
-      const last = blocks[blocks.length - 1];
-      if (entry.role === 'assistant' && last?.kind === 'assistant') {
-        last.prefill = true;
+      // prefilling. Kept VERBATIM (no reasoning / tool-call splitting):
+      // sub-blocks re-render through the template, which reworks
+      // non-final <think> sections, so only the literal text -- open
+      // tags included -- reproduces the mid-turn context exactly.
+      const content = raw.slice(contentStart);
+      if (entry.role === 'assistant') {
+        blocks.push({ kind: 'assistant', content, prefill: true });
+      } else {
+        blocks.push({ kind: KIND_BY_ROLE[entry.role], content });
       }
       warnings.push(
         `final ${entry.role} turn is not closed with ${JSON.stringify(entry.suffix)}; kept as an open turn.`
@@ -165,19 +168,25 @@ function appendRoleContent(
   content: string
 ): void {
   if (role === 'assistant') {
-    appendAssistantContent(blocks, warnings, profile, content);
+    splitAssistantContent(blocks, warnings, profile, content);
     return;
   }
   blocks.push({ kind: KIND_BY_ROLE[role], content });
 }
 
 /**
- * Split one assistant turn's content into reasoning / tool-call / text
- * blocks using the family's in-content conventions (``<think>`` tags,
- * ``<tool_call>`` JSON wrappers). Unknown constructs stay as plain
+ * Split one CLOSED assistant turn's content into reasoning / tool-call /
+ * text blocks using the family's in-content conventions (``<think>``
+ * tags, ``<tool_call>`` JSON wrappers). Unknown constructs stay as plain
  * assistant text -- with a warning when they LOOK structural.
+ *
+ * Exported because "append as assistant" reuses it when a FINISHED run
+ * closes the turn: templates re-render closed turns themselves (Qwen
+ * wraps ``reasoning_content`` in its own scaffold), so literal tags must
+ * become sub-blocks to round-trip. Open (prefill) turns are the opposite
+ * case and stay verbatim.
  */
-function appendAssistantContent(
+export function splitAssistantContent(
   blocks: ChatBlock[],
   warnings: string[],
   profile: TemplateProfile,

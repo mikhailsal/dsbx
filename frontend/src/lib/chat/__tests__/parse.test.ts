@@ -79,6 +79,19 @@ describe('parseRaw structure handling', () => {
     expect(result.warnings.join(' ')).toContain('not closed');
   });
 
+  it('keeps an unterminated turn with an OPEN <think> verbatim as ONE prefill block', () => {
+    // The open turn must NOT be split into a reasoning sub-block:
+    // sub-blocks re-render through the template (which reworks <think>
+    // sections), while the literal text round-trips exactly.
+    const raw = '<|im_start|>user\nq<|im_end|>\n<|im_start|>assistant\n<think>\nHmm, let me';
+    const result = parseRaw(raw, chatmlProfile);
+    expect(result.ok).toBe(true);
+    const last = result.doc.blocks[result.doc.blocks.length - 1];
+    expect(last).toEqual({ kind: 'assistant', content: '<think>\nHmm, let me', prefill: true });
+    expect(result.doc.blocks.some((b) => b.kind === 'assistant_reasoning')).toBe(false);
+    expect(result.warnings.join(' ')).toContain('not closed');
+  });
+
   it('returns a positioned error on a corrupted role marker, keeping prior blocks', () => {
     const good = '<|im_start|>user\nhi<|im_end|>\n';
     const raw = good + '<|im_TYPO|>assistant\nok<|im_end|>\n';

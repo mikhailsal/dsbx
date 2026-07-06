@@ -244,10 +244,8 @@
     if (!watchIds.includes(s)) watchIds = [...watchIds, s];
   }
 
-  /** Append a single token's text to the prompt (the per-token sibling of
-   *  the "move generation to prompt" button). In chat mode the text goes
-   *  into the conversation (raw editor or a trailing assistant block)
-   *  instead of the text-mode prompt box. */
+  /** Per-token sibling of "move generation to prompt". In chat mode the
+   *  text goes into the conversation instead of the text-mode box. */
   function addTokenToPrompt(text: string): void {
     if (composerMode === 'chat') {
       chatComposer?.appendAssistant(text, false); // one token != a finished turn
@@ -256,30 +254,27 @@
     prompt = prompt + text;
   }
 
-  // Snapshot of the prompt text that produced the on-screen generation.
-  // Captured at run start so the running-completion view renders a STABLE
-  // prefix (the live ``prompt`` may be edited afterwards, and "move to
-  // prompt" rewrites it -- using the snapshot keeps the displayed
-  // prefix+steps consistent and stops "move to prompt" from duplicating
-  // the completion back into its own prefix).
+  // Snapshot of the prompt that produced the on-screen generation, so
+  // the running-completion prefix stays stable while ``prompt`` changes.
   let runPromptText = $state('');
 
   /** Fold the run's prompt + everything the model generated into the
-   *  prompt box as a single continuous string, so the user can keep
-   *  generating from exactly what the running-completion shows. Replaces
-   *  (rather than appends) so an edited prompt never desyncs the result. */
+   *  prompt box (replacing it, so an edited prompt never desyncs). */
   function moveCompletionToPrompt(): void {
     prompt = runPromptText + completionText;
   }
 
   /** Chat-mode sibling of "move to prompt": fold the streamed completion
-   *  into the conversation as an assistant block (or append to the raw
-   *  editor). A run that ended the turn naturally (eos / stop token)
-   *  becomes a closed turn; a truncated one (max_tokens / cancelled)
-   *  becomes an OPEN prefill block the model can continue mid-turn. */
+   *  into the conversation. A natural end of turn (eos / stop) closes the
+   *  turn; a truncated run leaves an OPEN prefill block. Only the part
+   *  past ``appendedChars`` is folded, making the button idempotent (a
+   *  second click with no new tokens duplicates nothing). */
   function appendCompletionAsAssistant(): void {
+    const fresh = completionText.slice(appendedChars);
+    if (!fresh) return;
     const finished = stopReason === 'eos' || stopReason === 'user_stop';
-    chatComposer?.appendAssistant(completionText, finished);
+    chatComposer?.appendAssistant(fresh, finished);
+    appendedChars = completionText.length;
   }
 
   /** Scroll the matching generation-steps row into view and flash it, so
@@ -304,13 +299,14 @@
     window.setTimeout(() => el.classList.remove('row-flash'), 1600);
   }
 
-  // ``completionText`` is everything the model has emitted this run (the
-  // concatenated per-step token text). Drives the "move to prompt"
-  // button so the user can fold a generation back into the prompt and
-  // keep going.
+  // Everything the model has emitted this run (concatenated per-step
+  // token text); drives "move to prompt" / "append as assistant".
   let completionText = $derived<string>(
     steps.map((s) => s.decision.token_text).join('')
   );
+  // Chars of ``completionText`` already appended (reset with ``steps``).
+  let appendedChars = $state(0);
+  let completionAppendable = $derived(completionText.length > appendedChars);
 
   // Prefix shown in the running-completion view. Once a run has produced
   // output we show the captured ``runPromptText`` snapshot (NOT the live
@@ -328,6 +324,7 @@
    *  looks like it came from the newly-selected model/provider. */
   function clearRun(): void {
     steps = [];
+    appendedChars = 0;
     promptSteps = [];
     promptNote = '';
     stopReason = null;
@@ -664,6 +661,7 @@
     runPromptText = composerMode === 'chat' ? chatPrompt : prompt;
     if (opts.resetUi) {
       steps = [];
+      appendedChars = 0;
       promptSteps = [];
       promptNote = '';
       usage = null;
@@ -1530,9 +1528,11 @@
                 type="button"
                 class="btn btn-ghost text-[11px] py-0.5 px-2"
                 onclick={appendCompletionAsAssistant}
-                disabled={busy}
-                title="Fold the streamed completion into the conversation as an assistant block, so you can add the next user turn and keep the dialogue going."
-              >→ append as assistant</button>
+                disabled={busy || !completionAppendable}
+                title={completionAppendable
+                  ? 'Fold the streamed completion into the conversation as an assistant block, so you can add the next user turn and keep the dialogue going.'
+                  : 'Already appended — run another generation to get new tokens to fold in.'}
+              >{completionAppendable ? '→ append as assistant' : '✓ appended'}</button>
             {:else}
               <button
                 type="button"

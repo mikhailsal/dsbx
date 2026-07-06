@@ -123,6 +123,24 @@ describe('prefill (open assistant turn)', () => {
     expect(result.raw).not.toContain('</think>');
   });
 
+  it('renders an open turn as assistant prefix + verbatim content when the prefix is known', () => {
+    // With a derivable assistant prefix the scaffold lives IN the content
+    // (visible in the block); the template's generation prompt is NOT
+    // used, so nothing is injected invisibly.
+    const doc: ChatDoc = {
+      blocks: [
+        { kind: 'user', content: 'hi' },
+        { kind: 'assistant', content: '<think>\nHmm', prefill: true }
+      ],
+      addGenerationPrompt: false
+    };
+    const result = renderChat(doc, inputsOf('qwen3'), '<|im_start|>assistant\n');
+    expect(result.error).toBeNull();
+    expect(
+      result.raw.endsWith('<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\nHmm')
+    ).toBe(true);
+  });
+
   it('ignores a prefill flag on a non-final block, with a warning', () => {
     const doc: ChatDoc = {
       blocks: [

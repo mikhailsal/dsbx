@@ -23,7 +23,8 @@
   import ChatRawEditor from './ChatRawEditor.svelte';
   import ChatTemplatePanel from './ChatTemplatePanel.svelte';
   import { fetchChatTemplate, templateInputsOf } from '$lib/chat/template';
-  import { deriveProfile } from '$lib/chat/profile';
+  import { deriveProfile, prefillMarkers } from '$lib/chat/profile';
+  import { appendAssistantText } from '$lib/chat/append';
   import { renderChat } from '$lib/chat/render';
   import { parseRaw } from '$lib/chat/parse';
   import { buildSnippets } from '$lib/chat/snippets';
@@ -92,7 +93,10 @@
   let inputs = $derived(info ? templateInputsOf(info) : null);
   let profile = $derived(inputs ? deriveProfile(inputs) : null);
   let snippets = $derived(profile && inputs ? buildSnippets(profile, inputs) : []);
-  let rendered = $derived(inputs ? renderChat(doc, inputs) : null);
+  // Open-turn strings (assistant prefix + generation-prompt scaffold);
+  // null degrades prefill rendering to "generation prompt + content".
+  let openTurn = $derived(prefillMarkers(profile));
+  let rendered = $derived(inputs ? renderChat(doc, inputs, openTurn?.prefix ?? null) : null);
 
   // Raw editing is only offered when the profile round-trips reliably;
   // otherwise (weird template) blocks stay the single source of truth
@@ -148,23 +152,16 @@
    *
    * ``finished`` says whether the source run ended the turn naturally
    * (EOS / stop token). An UNFINISHED run (max_tokens, cancelled)
-   * becomes an open prefill block instead of a closed turn -- closing it
-   * would falsely append end-of-turn markers mid-sentence (and mangle
-   * open ``<think>`` sections on re-render). */
+   * becomes an open prefill block instead of a closed turn -- and a
+   * follow-up run's text MERGES into that same open turn instead of
+   * splitting the assistant message (see lib/chat/append.ts). */
   export function appendAssistant(text: string, finished: boolean): void {
     if (!text) return;
     if (subMode === 'raw' && rawEditable) {
       rawText = rawText + text;
       return;
     }
-    doc = {
-      ...doc,
-      blocks: [...doc.blocks, { kind: 'assistant', content: text, prefill: !finished }],
-      // The model just spoke; don't immediately cue another assistant
-      // turn -- the user will typically add a user block next (or, for
-      // a prefill block, generation continues the open turn directly).
-      addGenerationPrompt: false
-    };
+    doc = appendAssistantText(doc, text, finished, profile, inputs?.eosToken ?? null);
   }
 
   // Reset conversation state when the backend/model changes enough that

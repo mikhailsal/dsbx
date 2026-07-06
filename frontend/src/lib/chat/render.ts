@@ -150,7 +150,11 @@ function parseJsonArray(text: string): {
  * (``raise_exception``, ``strftime_now`` for gpt-oss date stamping), so
  * the context only carries the conversation and the tokenizer strings.
  */
-export function renderChat(doc: ChatDoc, inputs: TemplateInputs): RenderResult {
+export function renderChat(
+  doc: ChatDoc,
+  inputs: TemplateInputs,
+  assistantPrefix: string | null = null
+): RenderResult {
   const { messages, tools, warnings } = blocksToMessages(doc.blocks);
   const usedFallback = !inputs.template;
   if (usedFallback) {
@@ -158,6 +162,12 @@ export function renderChat(doc: ChatDoc, inputs: TemplateInputs): RenderResult {
   }
   const source = inputs.template ?? FALLBACK_CHATML_TEMPLATE;
   const prefill = prefillContent(doc, warnings);
+  // When the profile knows the assistant turn opener, an open turn is
+  // rendered as ``prefix + content`` -- so any scaffold the generation
+  // prompt would inject (Qwen's "<think>\n") lives IN the visible block
+  // content instead of being conjured invisibly. Without a derivable
+  // prefix, fall back to ``generation prompt + content``.
+  const usePrefix = prefill !== null && !!assistantPrefix;
 
   let raw = '';
   let error: string | null = null;
@@ -167,17 +177,17 @@ export function renderChat(doc: ChatDoc, inputs: TemplateInputs): RenderResult {
       // A trailing prefill block is NOT rendered through the template:
       // templates close (or mangle -- Qwen strips non-final <think>
       // sections) every message they render. Instead the prior turns
-      // render with the generation prompt and the prefill text is
-      // appended verbatim -- reproducing the exact token context of the
-      // mid-turn model, open reasoning sections included.
+      // render normally and the prefill text is appended verbatim --
+      // reproducing the exact token context of the mid-turn model,
+      // open reasoning sections included.
       messages: prefill === null ? messages : messages.slice(0, -1),
-      add_generation_prompt: prefill === null ? doc.addGenerationPrompt : true,
+      add_generation_prompt: prefill === null ? doc.addGenerationPrompt : !usePrefix,
       bos_token: inputs.bosToken ?? '',
       eos_token: inputs.eosToken ?? ''
     };
     if (tools) context.tools = tools;
     raw = template.render(context);
-    if (prefill !== null) raw += prefill;
+    if (prefill !== null) raw += usePrefix ? assistantPrefix + prefill : prefill;
   } catch (e) {
     error = e instanceof Error ? e.message : String(e);
   }

@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { deriveProfile, detectFamily } from '../profile';
+import { deriveProfile, detectFamily, prefillMarkers } from '../profile';
 import type { TemplateInputs } from '../types';
 import fixtures from '../fixtures/templates.json';
 
@@ -104,6 +104,26 @@ describe('deriveProfile on real templates', () => {
     });
     expect(profile.complete).toBe(false);
     expect(profile.notes.join(' ')).toContain('marker derivation failed');
+  });
+});
+
+describe('prefillMarkers', () => {
+  it('splits prefix and scaffold for a plain ChatML generation prompt', () => {
+    const markers = prefillMarkers(deriveProfile(inputsOf('chatml')));
+    expect(markers).toEqual({ prefix: '<|im_start|>assistant\n', scaffold: '' });
+  });
+
+  it('is null when the generation prompt does not start with the assistant prefix', () => {
+    // This Llama-3.1 variant appends the assistant header unconditionally
+    // (empty derived generation prompt), so the prefix/scaffold split is
+    // impossible -- prefill rendering falls back to generation prompt +
+    // content, which IS correct for such templates.
+    expect(prefillMarkers(deriveProfile(inputsOf('llama31')))).toBeNull();
+  });
+
+  it('is null for an incomplete profile', () => {
+    expect(prefillMarkers(deriveProfile({ template: null, bosToken: null, eosToken: null }))).toBeNull();
+    expect(prefillMarkers(null)).toBeNull();
   });
 });
 
