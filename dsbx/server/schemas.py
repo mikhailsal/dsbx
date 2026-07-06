@@ -110,6 +110,16 @@ class WireCapabilities(BaseModel):
     # requests against such backends with a 400, and the frontend picker
     # marks the option disabled with ``notes`` as the tooltip.
     generation_disabled: bool = False
+    # ``True`` when the backend can stream structured chat ``messages[]``
+    # natively via /chat/completions with per-token top_logprobs -- the
+    # chat-mode simulation path for chat-only providers. See
+    # ``Capabilities.supports_chat_stream``.
+    supports_chat_stream: bool = False
+    # Sampler names with a native /chat/completions analogue; non-empty
+    # only when ``supports_chat_stream`` is true. The frontend's chat-
+    # mode run buttons gate on this list (single source of truth:
+    # ``dsbx.core.samplers.CHAT_NATIVE_SAMPLERS``).
+    chat_samplers: list[str] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -231,6 +241,24 @@ class SpecialToken(BaseModel):
 
 class SpecialTokensResponse(BaseModel):
     tokens: list[SpecialToken]
+
+
+class ChatTemplateResponse(BaseModel):
+    """``GET /v1/chat_template`` -- the loaded model's chat template.
+
+    Wire mirror of :class:`dsbx.core.chat_template.ChatTemplateInfo`.
+    ``template`` is the raw Jinja source (``None`` for base models or
+    when discovery degraded -- ``note`` says which); ``source`` names the
+    discovery path (``gguf`` / ``transformers`` / ``hf_hub`` / ``none``).
+    """
+
+    template: str | None = None
+    source: str = "none"
+    bos_token: str | None = None
+    eos_token: str | None = None
+    special_tokens: dict[str, str] = Field(default_factory=dict)
+    note: str = ""
+    is_base_model: bool = False
 
 
 class NextDistributionRequest(BaseModel):
@@ -420,6 +448,8 @@ def capabilities_to_wire(caps) -> WireCapabilities:
         supports_prepend_token_ids=bool(getattr(caps, "supports_prepend_token_ids", False)),
         supports_local_tokenize=bool(getattr(caps, "supports_local_tokenize", False)),
         generation_disabled=bool(getattr(caps, "generation_disabled", False)),
+        supports_chat_stream=bool(getattr(caps, "supports_chat_stream", False)),
+        chat_samplers=[str(s) for s in getattr(caps, "chat_samplers", ())],
     )
 
 

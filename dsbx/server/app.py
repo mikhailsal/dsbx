@@ -45,6 +45,7 @@ from dsbx.core.backend import Backend
 from dsbx.core.engine import generate
 from dsbx.core.samplers import make_sampler
 from dsbx.server import schemas as S
+from dsbx.server.chat_api import add_chat_template_route
 
 log = logging.getLogger("dsbx.server.app")
 
@@ -342,6 +343,8 @@ def make_app(
         return S.SpecialTokensResponse(
             tokens=[S.SpecialToken(id=int(i), text=str(t)) for i, t in pairs]
         )
+
+    add_chat_template_route(app, slot, _require_ready)
 
     # ---------------------------------------------------------- inference
     @app.post("/v1/next_distribution", response_model=S.WireStepResult)

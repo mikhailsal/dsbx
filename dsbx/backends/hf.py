@@ -14,6 +14,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from dsbx.core.backend import Backend
+from dsbx.core.chat_template import (
+    ChatTemplateInfo,
+    looks_like_base_model,
+    none_info,
+    template_from_config_value,
+)
 from dsbx.core.types import Capabilities, StepResult, TokenCandidate
 
 
@@ -105,6 +111,40 @@ class HFBackend(Backend):
         if token_id not in self._piece_cache:
             self._piece_cache[token_id] = str(self.tokenizer.decode([token_id]))
         return self._piece_cache[token_id]
+
+    def chat_template_info(self) -> ChatTemplateInfo:
+        """Chat template straight from the in-process transformers tokenizer.
+
+        ``tokenizer.chat_template`` is populated by transformers from
+        ``tokenizer_config.json`` / ``chat_template.jinja`` at load time
+        (a plain Jinja string, or a name->template mapping on
+        multi-template repos -- normalized by
+        :func:`template_from_config_value`). ``None`` marks a base model.
+        """
+        template = template_from_config_value(getattr(self.tokenizer, "chat_template", None))
+        bos = getattr(self.tokenizer, "bos_token", None)
+        eos = getattr(self.tokenizer, "eos_token", None)
+        specials = {
+            key: str(val)
+            for key, val in (
+                ("bos_token", bos),
+                ("eos_token", eos),
+                ("unk_token", getattr(self.tokenizer, "unk_token", None)),
+                ("pad_token", getattr(self.tokenizer, "pad_token", None)),
+            )
+            if val
+        }
+        if template is None:
+            info = none_info()
+        else:
+            info = ChatTemplateInfo(template=template, source="transformers")
+        info.bos_token = str(bos) if bos else None
+        info.eos_token = str(eos) if eos else None
+        info.special_tokens = specials
+        # Some vendors (Qwen notably) ship a chat template in base-model
+        # repos too, so the repo name is the honest second signal.
+        info.base_hint = looks_like_base_model(self.model_id)
+        return info
 
     def special_tokens(self) -> list[tuple[int, str]]:
         """Special / added tokens from the transformers tokenizer.

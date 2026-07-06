@@ -30,6 +30,7 @@ class _EchoStreamingMixin:
 
         def _provider_flag(self, name: str) -> bool: ...
         def _ensure_tokenizer(self) -> Tokenizer | None: ...
+        def _surface_text(self, token_id: int | None, provider_text: str) -> str: ...
         def _attach_logprobs_request(self, body: dict[str, Any], *, top_k: int) -> None: ...
         def _sampler_to_api_params(self, name: str, params: dict[str, Any]) -> dict[str, Any]: ...
         def _genstep_from_emit_record(
@@ -59,6 +60,69 @@ class _EchoStreamingMixin:
         def tokenize(self, text: str) -> list[int]: ...
         def detokenize(self, token_ids: list[int]) -> str: ...
         def piece(self, token_id: int) -> str: ...
+
+    def _echo_start_pos(
+        self, expected: str, prompt_payload: str | list[int], echo_last: Any
+    ) -> int:
+        """Character offset in ``expected`` where the echo stream begins.
+
+        ``0`` for a whole-prompt echo. An ``echo_last=N`` stream starts at
+        the last N tokens of the prompt; with a local tokenizer we compute
+        that offset exactly instead of leaving ``_echo_match_advance`` to
+        re-anchor the first token via ``find`` -- which picks the FIRST
+        occurrence and mis-anchors when the token's text repeats earlier
+        in the prompt, potentially misclassifying the echo/emit boundary.
+        Falls back to ``0`` (the old find-based sync) whenever the local
+        view doesn't line up (no tokenizer, tokenization mismatch).
+        """
+        if not echo_last:
+            return 0
+        n = int(echo_last)
+        if self._ensure_tokenizer() is None:
+            return 0
+        ids = (
+            [int(t) for t in prompt_payload]
+            if isinstance(prompt_payload, list)
+            else self.tokenize(prompt_payload)
+        )
+        if n <= 0 or n >= len(ids):
+            return 0
+        tail = self.detokenize(ids[-n:])
+        if tail and expected.endswith(tail):
+            return len(expected) - len(tail)
+        return 0
+
+    def _echo_match_advance(
+        self, expected: str, match_pos: int, token_id: int | None, text: str
+    ) -> int | None:
+        """Classify one streamed position as prompt echo vs emitted token.
+
+        Returns the new match position when the position is part of the
+        PROMPT ECHO (its text continues ``expected`` -- the prompt string
+        we sent), or ``None`` when it is the first EMITTED token.
+
+        The subtlety is special tokens, which providers echo back with
+        EMPTY text: when we hold a local tokenizer the real piece is
+        resolved via ``_surface_text`` and matched literally (DeepSeek's
+        BOS advances the cursor by its 22-char literal); without one the
+        blank stays an echo with the cursor parked, and the NEXT
+        non-blank token re-anchors via ``find`` (also the fallback sync
+        for ``echo_last`` streams when :meth:`_echo_start_pos` couldn't
+        precompute the mid-prompt start). A blank whose resolved piece
+        is NOT in the prompt is a server-side prepend (Fireworks
+        auto-BOS) -- still echo, cursor unchanged.
+        """
+        if match_pos >= len(expected):
+            return None
+        literal = text or self._surface_text(token_id, text)
+        if not literal:
+            return match_pos
+        if expected.startswith(literal, match_pos):
+            return match_pos + len(literal)
+        if not text:
+            return match_pos
+        found = expected.find(literal, match_pos)
+        return None if found == -1 else found + len(literal)
 
     def stream_native_with_echo(
         self,
@@ -228,18 +292,20 @@ class _EchoStreamingMixin:
         # position the instant it lands instead of buffering the whole
         # response (the old "collect all, split, then yield" shape made
         # the browser paint generated tokens only after the run closed).
-        # Classification mirrors the old batch split exactly -- a
-        # three-tier signal, strongest first:
         #
-        # 1. ``text_offset`` (NewLogProbs): an echo entry has
-        #    ``text_offset < len(prompt)``; the first emit entry starts
-        #    at ``text_offset == len(prompt)``. OpenAI-documented and
-        #    honored by Fireworks.
-        # 2. ``sampling_mask_count`` / ``sampling_logprob`` presence:
-        #    omitted for echoed positions, populated for emitted ones.
-        #    A backup when the upstream omits ``text_offset``.
-        # 3. Cumulative ``text`` length: switch once the running total
-        #    exceeds ``len(prompt)``. Last-resort fallback.
+        # The echo/emit boundary is found by MATCHING each position's
+        # token text against the prompt we sent (see
+        # ``_echo_match_advance``). We deliberately do NOT trust
+        # ``text_offset``: providers compute it against their own
+        # detokenization, where special tokens render as EMPTY text --
+        # Fireworks echoes DeepSeek's literal 22-char
+        # ``<\uff5cbegin\u2581of\u2581sentence\uff5c>`` back as ``""``, shifting every
+        # subsequent offset left by 22. ``text_offset >= len(prompt)``
+        # then fires 22 chars LATE, silently reclassifying the first
+        # words of the completion as prompt echo (the user saw appended
+        # completions with their beginning cut off). ``sampling_logprob``
+        # presence is no signal either: current Fireworks attaches it to
+        # echoed positions too.
         #
         # Echo positions are yielded as ``StepResult`` immediately; the
         # first emit position flips us into emit mode, after which every
@@ -248,11 +314,15 @@ class _EchoStreamingMixin:
         # ``stop_reason``. Per-position record shape: (token_id_or_None,
         # text, logprob, top_payload, sampling_mask_count, text_offset,
         # has_sampling_signal).
-        prompt_len = len(prompt)
+        echo_expect = (
+            prompt
+            if isinstance(prompt_payload, str)
+            else self.detokenize([int(t) for t in prompt_payload])
+        )
+        echo_match_pos = self._echo_start_pos(echo_expect, prompt_payload, body.get("echo_last"))
         tokens_before: list[int] = self.tokenize(prompt)
         echo_pos_idx = 0
         emit_step_idx = 0
-        running_text_len = 0
         in_emit = False
         prev_emit: tuple[int | None, str, float, Any, int | None, int | None, bool] | None = None
         last_finish_reason: str | None = None
@@ -281,7 +351,7 @@ class _EchoStreamingMixin:
                 for entry in lp_obj.get("content") or []:
                     if not isinstance(entry, dict):
                         continue
-                    tok = str(entry.get("token", ""))
+                    tok_text = str(entry.get("token", ""))
                     tid_raw = entry.get("token_id")
                     tid: int | None = int(tid_raw) if tid_raw is not None else None
                     lp_raw = entry.get("logprob")
@@ -297,7 +367,7 @@ class _EchoStreamingMixin:
                     positions.append(
                         (
                             tid,
-                            tok,
+                            tok_text,
                             lp,
                             entry.get("top_logprobs", []),
                             smc,
@@ -326,15 +396,9 @@ class _EchoStreamingMixin:
                 last_finish_reason = str(fr)
             for pos in positions:
                 if not in_emit:
-                    _tid, pos_text, _lp, _top, _smc, text_off, has_signal = pos
-                    if text_off is not None:
-                        is_emit = text_off >= prompt_len
-                    elif has_signal:
-                        is_emit = True
-                    else:
-                        running_text_len += len(pos_text)
-                        is_emit = running_text_len > prompt_len
-                    if not is_emit:
+                    nxt = self._echo_match_advance(echo_expect, echo_match_pos, pos[0], pos[1])
+                    if nxt is not None:
+                        echo_match_pos = nxt
                         yield self._stepresult_from_echo_record(
                             pos, pos_idx=echo_pos_idx, watch_ids=watch_ids
                         )

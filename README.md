@@ -4,8 +4,8 @@
 
 [![CI](https://github.com/mikhailsal/dsbx/actions/workflows/ci.yml/badge.svg)](https://github.com/mikhailsal/dsbx/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Tests](https://img.shields.io/badge/tests-520%20passing-brightgreen)
-![Coverage](https://img.shields.io/badge/coverage-80%25-yellowgreen)
+![Tests](https://img.shields.io/badge/tests-605%20passing-brightgreen)
+![Coverage](https://img.shields.io/badge/coverage-82%25-yellowgreen)
 [![Ruff](https://img.shields.io/badge/lint-ruff-261230)](https://github.com/astral-sh/ruff)
 ![mypy](https://img.shields.io/badge/types-mypy-informational)
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-success)](.pre-commit-config.yaml)
@@ -36,6 +36,8 @@ This project was built to study model internals deeply, rather than just wrappin
 
 **Interactive token-by-token TUI.** Dive into the exact probability tree at any step. `dsbx manual` lets you guide the model manually.
 
+**White-box chat mode.** The Decode tab's `Text | Chat` toggle composes a conversation as structured blocks (system / user / assistant / reasoning / tool calls) and renders it client-side through the model's **real Jinja chat template**, so you see the exact raw token stream the model receives — and can edit it freely, snippet buttons included. Chat-only providers (NIM / OpenRouter) run in a simulation mode with a read-only template preview. See [docs/chat-mode.md](docs/chat-mode.md).
+
 **Multi-backend, swappable at runtime.** The browser's Status page can load or swap models on the GPU host without a restart, and shows the live capability envelope of every configured backend.
 
 ![Status page with remote model control](docs/images/status_remote_control.png)
@@ -53,7 +55,7 @@ Why build a white-box decoder? This tool solves practical problems for ML engine
 
 The project ships with the quality signals you'd expect of a production-ready, maintained codebase:
 
-* **Testing:** 520 tests written with `pytest` and `pytest-asyncio`, covering 80% of the codebase (line+branch).
+* **Testing:** 605 tests written with `pytest` and `pytest-asyncio`, covering 82% of the codebase (line+branch), plus 131 frontend `vitest` tests.
 * **Advanced Linting:** `ruff` is configured with an extended, strict rule set including `bugbear` (design), `bandit` (security), and `simplify`.
 * **Async & Storage:** Uses `FastAPI`, `SQLAlchemy 2.0`, and `aiosqlite` for high-performance asynchronous upstream request logging.
 * **Future Work:** AST-based code-size limits (`scripts/check_code_limits.py`) to enforce file-size ceilings and function-length advisories automatically.
@@ -64,8 +66,8 @@ The project ships with the quality signals you'd expect of a production-ready, m
 | Provider | chat logprobs | whole-context (prompt) logprobs | notes |
 |---|---|---|---|
 | **Fireworks** | yes (`top_logprobs` ≤ 5) | **yes** (`/completions` `echo`) | frontier models (gpt-oss-120b, glm, kimi, deepseek); rich [extension fields](docs/fireworks-extensions.md) |
-| **NVIDIA NIM** | yes (`top_logprobs` ≤ 20) | no | registered but generation gated off (chat-only) |
-| **OpenRouter** | yes (needs `provider.require_parameters`) | no | registered but generation gated off (chat-only) |
+| **NVIDIA NIM** | yes (`top_logprobs` ≤ 20) | no | chat-only: raw text continuation gated off; runs in [chat simulation mode](docs/chat-mode.md) |
+| **OpenRouter** | yes (needs `provider.require_parameters`) | no | chat-only: providers rewrite raw prompts server-side; runs in [chat simulation mode](docs/chat-mode.md) |
 | **LM Studio** | yes (`top_logprobs` ≤ 10) | no | local OpenAI-compatible server, no key needed |
 | **Local HF transformers** | n/a | **yes** (full `[seq, vocab]`) | full vocabulary, every position |
 | **Local llama.cpp (in-process)** | n/a | **yes** (full `[seq, vocab]`) | full vocab for GGUFs HF can't load |

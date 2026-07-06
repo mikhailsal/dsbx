@@ -225,6 +225,27 @@ _DEFAULTS: dict[str, Any] = {
                     "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
                 ),
             },
+            # Chat-TEMPLATE discovery repos for models whose template does
+            # not live next to a loadable ``tokenizer.json`` (so they can't
+            # ride the ``tokenizers`` mapping above):
+            #   * Kimi K2.x -> the moonshotai repos ship the template as a
+            #     standalone ``chat_template.jinja`` but a tiktoken-style
+            #     tokenizer (no tokenizer.json).
+            #   * DeepSeek V4 -> deepseek-ai publishes the chat format only
+            #     as Python ``encoding/`` code (no Jinja anywhere in the
+            #     vendor repo); the GGUF quantizer repo carries the
+            #     community-converted template in its GGUF metadata --
+            #     verified byte-identical (modulo whitespace) to llama.cpp's
+            #     official ``models/templates/deepseek-ai-DeepSeek-V4.jinja``.
+            #     Flash and Pro share one V4 template, so both point at the
+            #     same (Flash) GGUF repo.
+            "template_repos": {
+                "accounts/fireworks/models/kimi-k2p5": "moonshotai/Kimi-K2.5",
+                "accounts/fireworks/models/kimi-k2p6": "moonshotai/Kimi-K2.6",
+                "accounts/fireworks/models/kimi-k2p7-code": ("moonshotai/Kimi-K2.7-Code"),
+                "accounts/fireworks/models/deepseek-v4-flash": ("bartowski/DeepSeek-V4-Flash-GGUF"),
+                "accounts/fireworks/models/deepseek-v4-pro": ("bartowski/DeepSeek-V4-Flash-GGUF"),
+            },
             # Serverless models to DROP from the catalogue union: ``minimax-m3``
             # answers /v1/chat/completions but HANGS on /v1/completions (the
             # endpoint our token-level workbench needs), so it would dead-end
@@ -264,6 +285,17 @@ _DEFAULTS: dict[str, Any] = {
                 "mistralai/mistral-7b-instruct-v0.3",
                 "google/gemma-2-9b-it",
             ],
+            # Chat-only provider: the tokenizer mapping powers chat mode's
+            # simulated raw-template preview + live token counter (repos
+            # must ship tokenizer.json AND the chat template). Llama /
+            # Gemma entries point at ungated mirrors of the gated official
+            # repos (identical tokenizer + chat-template files).
+            "tokenizers": {
+                "meta/llama-3.1-8b-instruct": "NousResearch/Meta-Llama-3.1-8B-Instruct",
+                "meta/llama-3.1-70b-instruct": "NousResearch/Meta-Llama-3.1-70B-Instruct",
+                "mistralai/mistral-7b-instruct-v0.3": "mistralai/Mistral-7B-Instruct-v0.3",
+                "google/gemma-2-9b-it": "unsloth/gemma-2-9b-it",
+            },
         },
         "openrouter": {
             "base_url": "https://openrouter.ai/api/v1",
@@ -279,6 +311,14 @@ _DEFAULTS: dict[str, Any] = {
                 "qwen/qwen-2.5-7b-instruct",
                 "google/gemma-2-9b-it",
             ],
+            # See the NIM block above for why these mappings exist and why
+            # Llama / Gemma use ungated mirror repos.
+            "tokenizers": {
+                "meta-llama/llama-3.1-8b-instruct": "NousResearch/Meta-Llama-3.1-8B-Instruct",
+                "meta-llama/llama-3.1-70b-instruct": "NousResearch/Meta-Llama-3.1-70B-Instruct",
+                "qwen/qwen-2.5-7b-instruct": "Qwen/Qwen2.5-7B-Instruct",
+                "google/gemma-2-9b-it": "unsloth/gemma-2-9b-it",
+            },
         },
         "lmstudio": {
             "base_url": "http://127.0.0.1:1234/v1",
@@ -350,6 +390,14 @@ class ProviderConfig:
     # ``HF_TOKEN`` is missing or lacks access; we log a warning the first
     # time and the UI surfaces a helpful tooltip.
     tokenizers: dict[str, str] = field(default_factory=dict)
+    # Chat-template discovery repos, ``model_id -> HF repo``, consulted
+    # BEFORE ``tokenizers`` by ``chat_template_info()``. Exists for models
+    # whose template does not live next to a loadable ``tokenizer.json``:
+    # tiktoken-based repos (Kimi) and vendors that ship no Jinja at all,
+    # where a GGUF quantizer repo's metadata carries the community
+    # conversion (DeepSeek V4). Purely additive -- models absent from both
+    # maps degrade to the explicit "no repo mapped" note in the chat UI.
+    template_repos: dict[str, str] = field(default_factory=dict)
     # Per-model overrides of the provider-level ``supports_*`` flags. Maps
     # ``model_id -> {flag_name: bool}``; the OpenAI-compat backend reads
     # this via :meth:`flag_for_model`. Use case: a provider advertises a
@@ -571,6 +619,7 @@ def load_config(
             has_completions=bool(pdata.get("has_completions", False)),
             models=list(pdata.get("models", [])),
             tokenizers=dict(pdata.get("tokenizers", {}) or {}),
+            template_repos=dict(pdata.get("template_repos", {}) or {}),
             model_overrides={
                 str(k): {str(fk): bool(fv) for fk, fv in (v or {}).items()}
                 for k, v in (pdata.get("model_overrides") or {}).items()

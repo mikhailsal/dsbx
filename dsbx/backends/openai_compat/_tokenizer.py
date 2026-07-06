@@ -5,6 +5,13 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from dsbx.core.chat_template import (
+    ChatTemplateInfo,
+    fetch_hf_chat_template,
+    looks_like_base_model,
+    none_info,
+)
+
 if TYPE_CHECKING:
     import threading
 
@@ -30,6 +37,7 @@ class _TokenizerMixin:
         _bos_ids: tuple[int, ...]
         _id_to_text: dict[int, str]
         _text_to_id: dict[str, int]
+        _chat_template_cache: ChatTemplateInfo | None
         _BOS_TOKEN_CANDIDATES: tuple[str, ...]
         _INTERN_ID_BASE: int
 
@@ -212,6 +220,30 @@ class _TokenizerMixin:
             return []
         out.sort(key=lambda pair: pair[0])
         return out
+
+    def chat_template_info(self) -> ChatTemplateInfo:
+        """Chat template for ``self.model`` via its mapped HF repo.
+
+        The ``[providers.NAME.template_repos]`` mapping wins (it exists for
+        models whose TEMPLATE lives in a different repo than a loadable
+        ``tokenizer.json`` -- tiktoken-based Kimi, GGUF-only DeepSeek V4);
+        otherwise the local-tokenizer ``tokenizers`` mapping is reused.
+        Fetched from the Hub on first call and cached for the lifetime of
+        this backend instance -- success OR graceful failure, mirroring
+        ``_ensure_tokenizer``'s no-respam policy.
+        """
+        if self._chat_template_cache is not None:
+            return self._chat_template_cache
+        repo = (self.provider.template_repos or {}).get(self.model) or (
+            self.provider.tokenizers or {}
+        ).get(self.model)
+        if not repo:
+            info = none_info(note="no HF tokenizer repo mapped for this model")
+        else:
+            info = fetch_hf_chat_template(repo)
+        info.base_hint = info.base_hint or looks_like_base_model(self.model)
+        self._chat_template_cache = info
+        return info
 
     def piece(self, token_id: int) -> str:
         tok = self._ensure_tokenizer()

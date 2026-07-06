@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from dsbx.core.backend import Backend
+from dsbx.core.chat_template import ChatTemplateInfo, looks_like_base_model, none_info
 from dsbx.core.types import Capabilities, StepResult, TokenCandidate
 
 
@@ -237,6 +238,33 @@ class LlamaCppPyBackend(Backend):
         if tid < 0:
             return ()
         return (tid,)
+
+    def chat_template_info(self) -> ChatTemplateInfo:
+        """Chat template from the GGUF's ``tokenizer.chat_template`` metadata.
+
+        GGUF converters copy the HF repo's chat template into this metadata
+        key verbatim -- INCLUDING for base models whose vendor repo ships a
+        ChatML scaffold anyway (Qwen3.5-9B-Base does). So template absence
+        is only half the base-model signal; the GGUF filename and
+        ``general.name`` metadata provide the other half via
+        :func:`looks_like_base_model`. BOS / EOS surface forms come from
+        the ids the backend already discovered, rendered via :meth:`piece`
+        (``special=True``) so they read as their real ``<|...|>`` names.
+        """
+        meta = getattr(self._llama, "metadata", {}) or {}
+        template = str(meta.get("tokenizer.chat_template", "")) or None
+        bos = self.piece(self._bos_ids[0]) if self._bos_ids else None
+        eos = self.piece(self._eos_ids[0]) if self._eos_ids else None
+        info = ChatTemplateInfo(template=template, source="gguf") if template else none_info()
+        info.bos_token = bos or None
+        info.eos_token = eos or None
+        info.special_tokens = {
+            key: val for key, val in (("bos_token", bos), ("eos_token", eos)) if val
+        }
+        info.base_hint = looks_like_base_model(Path(self.model_path).name) or looks_like_base_model(
+            str(meta.get("general.name", ""))
+        )
+        return info
 
     def _is_special(self, token_id: int) -> bool:
         if token_id in self._eos_ids:

@@ -31,6 +31,7 @@ from typing import Any
 import httpx
 
 from dsbx.core.backend import Backend
+from dsbx.core.chat_template import ChatTemplateInfo, none_info
 from dsbx.core.engine import GenStep
 from dsbx.core.samplers import SamplerDecision
 from dsbx.core.types import Capabilities, StepResult, TokenCandidate
@@ -106,6 +107,7 @@ class RemoteBackend(Backend):
         # network burst.
         self._piece_cache: dict[int, str] = {}
         self._special_tokens_cache: list[tuple[int, str]] | None = None
+        self._chat_template_cache: ChatTemplateInfo | None = None
 
     # ------------------------------------------------------------------ #
     @property
@@ -166,6 +168,7 @@ class RemoteBackend(Backend):
         self._apply_info(self._get_info())
         self._piece_cache = {}
         self._special_tokens_cache = None
+        self._chat_template_cache = None
 
     # ----------------------------------------------- model slot control
     def server_status(self) -> dict:
@@ -251,6 +254,27 @@ class RemoteBackend(Backend):
             out = []
         self._special_tokens_cache = out
         return out
+
+    def chat_template_info(self) -> ChatTemplateInfo:
+        """Proxy to the remote server's ``GET /v1/chat_template``.
+
+        Degrades to the "no template" shape (with an explanatory note)
+        against an OLDER dsbx-server that predates the endpoint -- the
+        chat UI then reports "template unavailable" instead of wrongly
+        claiming the loaded model is a base model. Cached per handle;
+        cleared by :meth:`refresh_info` on model swaps.
+        """
+        if self._chat_template_cache is not None:
+            return self._chat_template_cache
+        try:
+            data = self._get("/v1/chat_template")
+            info = ChatTemplateInfo.from_dict(data)
+            if info.template is not None:
+                info.source = "remote"
+        except RemoteBackendError:
+            info = none_info(note="remote dsbx-serve does not expose /v1/chat_template")
+        self._chat_template_cache = info
+        return info
 
     def next_distribution(
         self,
@@ -517,6 +541,8 @@ def _capabilities_from_dict(d: dict) -> Capabilities:
         bos_token_ids=tuple(int(i) for i in d.get("bos_token_ids", [])),
         supports_prepend_token_ids=bool(d.get("supports_prepend_token_ids", False)),
         supports_local_tokenize=bool(d.get("supports_local_tokenize", False)),
+        supports_chat_stream=bool(d.get("supports_chat_stream", False)),
+        chat_samplers=tuple(str(s) for s in d.get("chat_samplers", [])),
     )
 
 

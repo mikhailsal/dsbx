@@ -19,11 +19,14 @@ from dsbx.backends.openai_compat._fireworks_ext import _FireworksExtMixin
 from dsbx.backends.openai_compat._http import _HttpMixin
 from dsbx.backends.openai_compat._parsing import _ParsingMixin
 from dsbx.backends.openai_compat._streaming import _StreamingMixin
+from dsbx.backends.openai_compat._streaming_chat import _ChatStreamingMixin
 from dsbx.backends.openai_compat._streaming_echo import _EchoStreamingMixin
 from dsbx.backends.openai_compat._tokenizer import _TokenizerMixin
 from dsbx.core import usage as usage_mod
 from dsbx.core.backend import Backend
+from dsbx.core.chat_template import ChatTemplateInfo
 from dsbx.core.config import ProviderConfig
+from dsbx.core.samplers import CHAT_NATIVE_SAMPLERS
 from dsbx.core.types import Capabilities, StepResult, TokenCandidate
 
 if TYPE_CHECKING:
@@ -34,6 +37,7 @@ log = logging.getLogger(__name__)
 
 class OpenAICompatBackend(
     _StreamingMixin,
+    _ChatStreamingMixin,
     _EchoStreamingMixin,
     _FireworksExtMixin,
     _ParsingMixin,
@@ -94,6 +98,11 @@ class OpenAICompatBackend(
         self._tokenizer_load_error: str = ""
         self._tokenizer_load_lock = threading.Lock()
         self._bos_ids: tuple[int, ...] = ()
+        # Chat-template discovery result (see ``_TokenizerMixin.
+        # chat_template_info``). ``None`` == "not fetched yet"; after the
+        # first call it always holds a ChatTemplateInfo (possibly the
+        # degraded ``source="none"`` shape) so the Hub is hit at most once.
+        self._chat_template_cache: ChatTemplateInfo | None = None
         # The web layer sets this immediately before invoking a method
         # and clears it after, while holding the per-backend lock from
         # :mod:`dsbx.web.backends`. While it's set, every
@@ -209,10 +218,17 @@ class OpenAICompatBackend(
         # real bos_token_ids so the "fill BOS" helper auto-populates,
         # (c) advertise supports_local_tokenize so the UI shows the live
         # token preview as the user types.
-        local_tokenizer = self._ensure_tokenizer() if not is_chat_only else None
+        # Chat-only providers now DO load their mapped tokenizer: chat
+        # mode's simulation path uses it for the live token preview and
+        # watch-column id resolution even though token-array prompts
+        # remain impossible (no /completions endpoint to send them to).
+        local_tokenizer = self._ensure_tokenizer()
         has_local_tokenizer = local_tokenizer is not None
         if is_chat_only:
-            notes = "chat-only provider; generation disabled until proper chat-mode UI lands"
+            notes = (
+                "chat-only provider; text continuation disabled -- use chat "
+                "mode (the provider renders the chat template server-side)"
+            )
         elif self._provider_flag("supports_prompt_logprobs"):
             notes = "whole-context via echo"
         else:
@@ -252,6 +268,12 @@ class OpenAICompatBackend(
                 self._provider_flag("supports_combined_echo_stream")
             ),
             generation_disabled=is_chat_only,
+            # Chat-only providers stream structured messages[] natively
+            # via /chat/completions with top_logprobs -- the chat-mode
+            # simulation path. Template-capable providers keep this off
+            # (their chat mode renders client-side onto the prompt path).
+            supports_chat_stream=is_chat_only,
+            chat_samplers=tuple(sorted(CHAT_NATIVE_SAMPLERS)) if is_chat_only else (),
             # Populated from the local HF tokenizer's special-tokens
             # table when available; empty otherwise. Empty means the
             # UI's "fill BOS" helper greys out (and we'd fall back to

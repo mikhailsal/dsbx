@@ -186,6 +186,23 @@ class Capabilities:
     # the ``notes`` field as the tooltip explanation. Default ``False``
     # for every other backend.
     generation_disabled: bool = False
+    # When true, the backend can stream a chat conversation natively via
+    # the provider's ``/chat/completions`` endpoint with per-token
+    # ``top_logprobs`` (see ``stream_chat_native`` on the OpenAI-compat
+    # backend). This is the chat-mode "simulation" path for chat-only
+    # providers (NIM / OpenRouter): ``generation_disabled`` keeps text-
+    # continuation off (the provider rewrites raw prompts server-side)
+    # while this flag lets the Decode workbench's chat mode send
+    # structured ``messages[]`` instead. Template-capable backends leave
+    # this False -- their chat mode renders the template client-side and
+    # rides the ordinary ``prompt`` path, one source of truth.
+    supports_chat_stream: bool = False
+    # Sampler names with a native /chat/completions analogue, populated
+    # (from ``dsbx.core.samplers.CHAT_NATIVE_SAMPLERS``) only when
+    # ``supports_chat_stream`` is true. Surfaced over the wire so the
+    # frontend's chat-mode run buttons gate on the backend's actual
+    # allowlist instead of hard-coding a copy that could drift.
+    chat_samplers: tuple[str, ...] = ()
 
 
 @dataclass

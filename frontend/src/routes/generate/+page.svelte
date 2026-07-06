@@ -10,15 +10,23 @@
   import TokenInline from '$lib/components/TokenInline.svelte';
   import CompletionToken from '$lib/components/CompletionToken.svelte';
   import TokenComposer from '$lib/components/TokenComposer.svelte';
+  import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import { apiStream } from '$lib/api';
+  import type { ChatMessage } from '$lib/chat/types';
+  import {
+    buildGenerateRequest,
+    type LogitBiasRow,
+    type SamplerName
+  } from '$lib/generate/request';
+  import { consumeGenerateStream } from '$lib/generate/stream';
+  import { buildWatchColumns, watchedAt, type WatchColumn } from '$lib/generate/watch';
   import { info } from '$lib/stores/info';
   import { probFromLogprob, tokenBackgroundClass, formatProbPct, rankCandidates } from '$lib/render';
   import type {
     GenStep,
     StepResult,
     TokenCandidate,
-    Watched,
     BackendInfo,
     UsagePayload,
     PerfMetricsPayload,
@@ -31,6 +39,19 @@
   let backend = $state<string>('');
   let model = $state<string>('');
   let prompt = $state('Once upon a time');
+  // ---- chat mode (the Text | Chat toggle) --------------------------------
+  // Chat mode swaps the prompt SOURCE, not the pipeline: the ChatComposer
+  // renders the conversation through the model's own chat template
+  // (client-side Jinja) into ``chatPrompt``, which rides the existing
+  // ``prompt`` wire field -- so inspect / generate / manual / watch /
+  // bias all work unchanged. Chat-only providers (NIM / OpenRouter)
+  // instead produce ``chatMessages`` for the simulation path.
+  let composerMode = $state<'text' | 'chat'>('text');
+  let chatPrompt = $state('');
+  let chatMessages = $state<ChatMessage[] | null>(null);
+  let chatTools = $state<Record<string, unknown>[] | null>(null);
+  let chatReady = $state(false);
+  let chatComposer = $state<ChatComposer | null>(null);
   let maxTokens = $state(20);
   // ``alternatives`` is the number of top-k logprobs we both FETCH from
   // the backend AND show in the table. There was a separate "alts shown"
@@ -86,14 +107,6 @@
   // matters when the active backend advertises supports_service_tier.
   let serviceTier = $state<'default' | 'priority'>('default');
 
-  type SamplerName =
-    | 'greedy'
-    | 'temperature'
-    | 'top_k'
-    | 'top_p'
-    | 'min_p'
-    | 'typical'
-    | 'mirostat';
   let sampler = $state<SamplerName>('greedy');
   let temperature = $state(1.0);
   let samplerTopK = $state(40);
@@ -133,10 +146,9 @@
   // produced a non-empty payload.
   let rawOutput = $state<RawOutputPayload | null>(null);
   // ``logit_bias`` editor: a list of (token_id, bias) rows the user
-  // can add / delete. We keep them as strings while editing so the
-  // user can type freely (a partial "-1" before the "0" doesn't snap
-  // back to "0" mid-typing) and parse + clamp at submit time.
-  type LogitBiasRow = { id: string; tokenId: string; bias: string };
+  // can add / delete. Strings while editing so the user can type
+  // freely; parsed + clamped at submit time by ``collectLogitBias``
+  // inside the request builder.
   let logitBiasRows = $state<LogitBiasRow[]>([]);
 
   // -------- Manual decoding (browser-side ephemeral state) ----------
@@ -232,26 +244,37 @@
     if (!watchIds.includes(s)) watchIds = [...watchIds, s];
   }
 
-  /** Append a single token's text to the prompt (the per-token sibling of
-   *  the "move generation to prompt" button). */
+  /** Per-token sibling of "move generation to prompt". In chat mode the
+   *  text goes into the conversation instead of the text-mode box. */
   function addTokenToPrompt(text: string): void {
+    if (composerMode === 'chat') {
+      chatComposer?.appendAssistant(text, false); // one token != a finished turn
+      return;
+    }
     prompt = prompt + text;
   }
 
-  // Snapshot of the prompt text that produced the on-screen generation.
-  // Captured at run start so the running-completion view renders a STABLE
-  // prefix (the live ``prompt`` may be edited afterwards, and "move to
-  // prompt" rewrites it -- using the snapshot keeps the displayed
-  // prefix+steps consistent and stops "move to prompt" from duplicating
-  // the completion back into its own prefix).
+  // Snapshot of the prompt that produced the on-screen generation, so
+  // the running-completion prefix stays stable while ``prompt`` changes.
   let runPromptText = $state('');
 
   /** Fold the run's prompt + everything the model generated into the
-   *  prompt box as a single continuous string, so the user can keep
-   *  generating from exactly what the running-completion shows. Replaces
-   *  (rather than appends) so an edited prompt never desyncs the result. */
+   *  prompt box (replacing it, so an edited prompt never desyncs). */
   function moveCompletionToPrompt(): void {
     prompt = runPromptText + completionText;
+  }
+
+  /** Chat-mode sibling of "move to prompt": fold the streamed completion
+   *  into the conversation. A natural end of turn (eos / stop) closes the
+   *  turn; a truncated run leaves an OPEN prefill block. Only the part
+   *  past ``appendedChars`` is folded, making the button idempotent (a
+   *  second click with no new tokens duplicates nothing). */
+  function appendCompletionAsAssistant(): void {
+    const fresh = completionText.slice(appendedChars);
+    if (!fresh) return;
+    const finished = stopReason === 'eos' || stopReason === 'user_stop';
+    chatComposer?.appendAssistant(fresh, finished);
+    appendedChars = completionText.length;
   }
 
   /** Scroll the matching generation-steps row into view and flash it, so
@@ -276,13 +299,14 @@
     window.setTimeout(() => el.classList.remove('row-flash'), 1600);
   }
 
-  // ``completionText`` is everything the model has emitted this run (the
-  // concatenated per-step token text). Drives the "move to prompt"
-  // button so the user can fold a generation back into the prompt and
-  // keep going.
+  // Everything the model has emitted this run (concatenated per-step
+  // token text); drives "move to prompt" / "append as assistant".
   let completionText = $derived<string>(
     steps.map((s) => s.decision.token_text).join('')
   );
+  // Chars of ``completionText`` already appended (reset with ``steps``).
+  let appendedChars = $state(0);
+  let completionAppendable = $derived(completionText.length > appendedChars);
 
   // Prefix shown in the running-completion view. Once a run has produced
   // output we show the captured ``runPromptText`` snapshot (NOT the live
@@ -300,6 +324,7 @@
    *  looks like it came from the newly-selected model/provider. */
   function clearRun(): void {
     steps = [];
+    appendedChars = 0;
     promptSteps = [];
     promptNote = '';
     stopReason = null;
@@ -449,18 +474,50 @@
     'next token from the tokens before it; with zero input tokens there is ' +
     'nothing to condition on. Type some text, or insert a special token ' +
     '(e.g. the model’s BOS) from the palette to seed generation.';
-  // Chat-only providers (NIM / OpenRouter) are registered but inert
-  // until proper chat-mode UI lands; the middleware rejects
-  // generate-stream requests against them with a 400. We mirror the
-  // gate here so the button is visibly disabled and carries the
-  // backend's ``notes`` as a tooltip explanation, instead of letting
-  // the click round-trip and bounce off a 400.
+  // Chat-only providers (NIM / OpenRouter) refuse raw text continuation;
+  // the middleware rejects plain-prompt generate-stream requests against
+  // them with a 400. We mirror the gate here so the TEXT-mode buttons are
+  // visibly disabled with an explanation -- and point at chat mode, where
+  // these backends DO stream (the messages[] simulation path).
   let generationDisabled = $derived<boolean>(
     !!activeCaps?.generation_disabled
   );
   let generationDisabledNote = $derived<string>(
     activeCaps?.notes ?? ''
   );
+  let supportsChatStream = $derived<boolean>(
+    !!activeCaps?.supports_chat_stream
+  );
+  // Simulation mode: chat-only backend in chat mode. The composer sends
+  // structured messages[]; features that need a raw token stream (manual
+  // picking, prompt logits, prepend) are hidden with explanatory notes.
+  let chatSimulation = $derived<boolean>(
+    generationDisabled && supportsChatStream
+  );
+  // On the /chat/completions path only samplers with a native analogue
+  // can run server-side; anything else would silently degrade, so the
+  // run buttons gate on the backend-supplied allowlist honestly.
+  let chatSamplers = $derived<string[]>(activeCaps?.chat_samplers ?? []);
+  let chatSamplerUnsupported = $derived<boolean>(
+    composerMode === 'chat' && chatSimulation && !chatSamplers.includes(sampler)
+  );
+  // What the run buttons check per mode: text mode needs a prompt and a
+  // /completions-capable backend; chat mode needs a runnable composer
+  // state (and, for simulation, a chat-capable sampler).
+  let runBlockedNote = $derived<string>(
+    composerMode === 'text'
+      ? generationDisabled
+        ? generationDisabledNote || 'raw text continuation is disabled on this backend'
+        : ''
+      : generationDisabled && !supportsChatStream
+        ? generationDisabledNote || 'this backend can run neither raw prompts nor chat messages'
+        : chatSamplerUnsupported
+          ? `sampler "${sampler}" has no /chat/completions analogue on this provider — use ${chatSamplers.join(', ') || 'greedy'} in simulation mode`
+          : !chatReady
+            ? 'the chat composer has nothing runnable yet — add a message (or fix the template error shown above)'
+            : ''
+  );
+  let runBlocked = $derived<boolean>(runBlockedNote !== '');
 
   // ``alternatives`` ceiling comes from the backend's capabilities. Cloud
   // providers cap aggressively (Fireworks: 5, NIM/OpenRouter: 20,
@@ -517,62 +574,13 @@
     maybeClearForSwitch();
   }
 
-  function samplerParams(): Record<string, number | null> {
-    const penalties: Record<string, number> = {};
-    if (repetitionPenalty !== 1.0) penalties.repetition_penalty = repetitionPenalty;
-    if (frequencyPenalty !== 0.0) penalties.frequency_penalty = frequencyPenalty;
-    if (presencePenalty !== 0.0) penalties.presence_penalty = presencePenalty;
-    switch (sampler) {
-      case 'greedy':
-        return { ...penalties };
-      case 'temperature':
-        return { temperature, ...penalties };
-      case 'top_k':
-        return { temperature, top_k: samplerTopK, ...penalties };
-      case 'top_p':
-        return { temperature, top_p: topP, ...penalties };
-      case 'min_p':
-        return { temperature, min_p: minP, ...penalties };
-      case 'mirostat':
-        return {
-          temperature,
-          mirostat_target: mirostatTarget,
-          mirostat_lr: mirostatLr,
-          ...penalties
-        };
-      case 'typical':
-        return { temperature, typical_p: typicalP, ...penalties };
-    }
-  }
-
   /**
-   * Convert the editor rows to the wire shape ``{<token_id>: <bias>}``
-   * with string keys (JSON requirement). Silently drop rows with
-   * unparseable ids or out-of-range biases; the backend would reject
-   * those anyway and we'd rather the user keep their partial input
-   * visible than have the page nuke half their edits at submit time.
-   * Returns ``undefined`` -- not an empty object -- when there are no
-   * valid rows, so the request omits the field entirely.
-   */
-  function collectLogitBias(): Record<string, number> | undefined {
-    if (!logitBiasSupported) return undefined;
-    const out: Record<string, number> = {};
-    for (const row of logitBiasRows) {
-      const tid = Number.parseInt(row.tokenId, 10);
-      const bias = Number.parseFloat(row.bias);
-      if (!Number.isFinite(tid) || !Number.isFinite(bias)) continue;
-      if (bias < -100 || bias > 100) continue;
-      out[String(tid)] = bias;
-    }
-    return Object.keys(out).length ? out : undefined;
-  }
-
-  /**
-   * Build the request body for a generate-stream call. Mode-specific
-   * fields (max_tokens, include_prompt, prefix_token_ids, manual session
-   * UUIDs) are layered on top of the common fields here so the three
-   * action buttons stay one-liners. ``prefix`` defaults to the manual
-   * picker's accumulated picks when set; pass ``[]`` for inspect/generate.
+   * Assemble the wire body via the tested ``lib/generate/request``
+   * builder. This wrapper's job is only to snapshot page state into the
+   * pure config: the prompt SOURCE is mode-resolved here (chat mode
+   * feeds the composer's rendered template text -- or structured
+   * messages[] for the chat-only simulation path), and the prepend
+   * count is pinned for the prompt-logits table highlight.
    */
   function buildRequest(opts: {
     maxTokensOverride?: number;
@@ -580,52 +588,54 @@
     prefix?: number[];
     forManual?: boolean;
   }): Record<string, unknown> {
-    const stop_ids = stopIds
-      .map((s) => Number.parseInt(s, 10))
-      .filter((n) => Number.isFinite(n));
-    const watch_ids_resolved = watchIds
-      .map((s) => Number.parseInt(s, 10))
-      .filter((n) => Number.isFinite(n));
-    const includeP = opts.includePromptOverride ?? includePrompt;
-    return {
-      backend,
-      model: model || undefined,
-      prompt,
-      sampler: { name: sampler, params: samplerParams() },
-      max_tokens: opts.maxTokensOverride ?? maxTokens,
-      top_k: alternatives,
-      stop_texts: stopTexts,
-      stop_ids,
-      seed,
-      respect_eos: respectEos,
-      include_prompt: includeP,
-      service_tier: serviceTierSupported ? serviceTier : undefined,
-      logit_bias: collectLogitBias(),
-      echo_last:
-        includeP && combinedEchoStreamSupported && echoLast > 0 ? echoLast : undefined,
-      watch_texts: watchTexts,
-      watch_ids: watch_ids_resolved,
-      watch_eos: watchEos,
-      prefix_token_ids: opts.prefix ?? [],
-      prepend_token_ids: (() => {
-        const ids = prependSupported
-          ? prependTokenIds
-              .map((s) => Number.parseInt(s, 10))
-              .filter((n) => Number.isFinite(n))
-          : [];
-        // Pinned at request time so the prompt-logits table can
-        // highlight the "BOS-conditioned" row even after the user
-        // edits the chip-input between runs (the rendered table
-        // reflects the run that produced it, not the current input).
-        lastRunPrependCount = ids.length;
-        return ids;
-      })(),
-      // Manual mode pins both UUIDs so Fireworks can reuse the KV cache
-      // and MoE expert routing across picks; for the other modes we
-      // leave them ``undefined`` so each click is a fresh request.
-      session_id: opts.forManual ? manualSessionId : undefined,
-      prompt_cache_key: opts.forManual ? manualCacheKey : undefined
-    };
+    const chatMode = composerMode === 'chat';
+    const simulation = chatMode && chatSimulation;
+    const { body, prependCount } = buildGenerateRequest(
+      {
+        backend,
+        model,
+        prompt: chatMode ? chatPrompt : prompt,
+        messages: simulation ? (chatMessages ?? []) : null,
+        tools: simulation ? chatTools : null,
+        sampler,
+        samplerKnobs: {
+          temperature,
+          topK: samplerTopK,
+          topP,
+          minP,
+          typicalP,
+          mirostatTarget,
+          mirostatLr,
+          repetitionPenalty,
+          frequencyPenalty,
+          presencePenalty
+        },
+        maxTokens,
+        alternatives,
+        stopTexts,
+        stopIds,
+        seed,
+        respectEos,
+        includePrompt,
+        serviceTier,
+        serviceTierSupported,
+        logitBiasRows,
+        logitBiasSupported,
+        echoLast,
+        combinedEchoStreamSupported,
+        watchTexts,
+        watchIds,
+        watchEos,
+        prependTokenIds,
+        prependSupported
+      },
+      { ...opts, manualSessionId, manualCacheKey }
+    );
+    // Pinned at request time so the prompt-logits table can highlight
+    // the "BOS-conditioned" row even after the user edits the
+    // chip-input between runs.
+    lastRunPrependCount = prependCount;
+    return body;
   }
 
   /**
@@ -647,9 +657,10 @@
     // Stamp the config that produces this output so a later backend/model
     // switch knows whether the displayed result is stale.
     producedKey = `${backend}\u0000${model}`;
-    runPromptText = prompt;
+    runPromptText = composerMode === 'chat' ? chatPrompt : prompt;
     if (opts.resetUi) {
       steps = [];
+      appendedChars = 0;
       promptSteps = [];
       promptNote = '';
       usage = null;
@@ -660,9 +671,8 @@
     const stream = apiStream('/api/v1/generate/stream', body);
     cancelFn = stream.cancel;
     try {
-      for await (const evt of stream.events) {
-        if (evt.event === 'step') {
-          const gs = evt.step as GenStep;
+      await consumeGenerateStream(stream.events, {
+        onStep: (gs) => {
           rememberFromStep(gs.step_result);
           rememberToken(gs.decision?.token_id, gs.decision?.token_text ?? '');
           if (opts.onStep) {
@@ -670,9 +680,8 @@
           } else {
             steps = [...steps, gs];
           }
-        } else if (evt.event === 'prompt_score') {
-          const ps = (evt as { steps: StepResult[] }).steps ?? [];
-          const note = (evt as { note?: string }).note ?? '';
+        },
+        onPromptScore: (ps, note) => {
           for (const s of ps) rememberFromStep(s);
           if (opts.onPromptScore) {
             opts.onPromptScore(ps, note);
@@ -680,27 +689,15 @@
             promptSteps = ps;
             promptNote = note;
           }
-        } else if (evt.event === 'perf') {
-          const p = (evt as { metrics?: PerfMetricsPayload }).metrics;
-          perf = p && typeof p === 'object' ? p : null;
-        } else if (evt.event === 'raw_output') {
-          const p = (evt as { payload?: RawOutputPayload }).payload;
-          rawOutput = p && typeof p === 'object' ? p : null;
-        } else if (evt.event === 'usage') {
-          const u = evt as unknown as UsagePayload & { event: 'usage' };
-          usage = {
-            requests: u.requests ?? 0,
-            prompt_tokens: u.prompt_tokens ?? null,
-            completion_tokens: u.completion_tokens ?? null,
-            total_tokens: u.total_tokens ?? null,
-            notes: Array.isArray(u.notes) ? u.notes : []
-          };
-        } else if (evt.event === 'done') {
-          stopReason = (evt as { stop_reason?: string | null }).stop_reason ?? null;
-          const err = (evt as { error?: string | null }).error;
+        },
+        onPerf: (metrics) => (perf = metrics),
+        onRawOutput: (payload) => (rawOutput = payload),
+        onUsage: (u) => (usage = u),
+        onDone: (reason, err) => {
+          stopReason = reason;
           if (err) streamError = err;
         }
-      }
+      });
     } catch (exc) {
       streamError = exc instanceof Error ? exc.message : String(exc);
     } finally {
@@ -864,69 +861,18 @@
     return probFromLogprob(c.logprob);
   }
 
-  function watchedById(step: StepResult, id: number): TokenCandidate | null {
-    const w = step.watched.find((x: Watched) => x.token_id === id);
-    return w ? w.candidate : null;
-  }
-
-  /**
-   * Frontend reconstructs human-readable watch column headers from what
-   * IT sent (no server-side ResolvedWatch round-trip; the inspect
-   * endpoint that needed it is gone). De-duplication semantics mirror
-   * the server's :func:`_resolve_watches` so the columns line up with
-   * the per-step ``watched`` arrays.
-   */
-  type WatchColumn = { label: string; tokenId: number; source: 'text' | 'id' | 'eos' };
-  let watchColumns = $derived.by<WatchColumn[]>(() => {
-    const out: WatchColumn[] = [];
-    const seen = new Set<number>();
-    // text watches: we don't know the tokenizer in-browser, so we
-    // can't pre-resolve to ids. Instead we render the label up front
-    // and pair it with the watched cell by scanning each row's
-    // ``watched`` list for "the first id we haven't matched yet that
-    // looks like it came from a text watch". Practically: text
-    // watches always appear before id+eos watches in the server-side
-    // resolution order, so we render them as placeholder columns and
-    // let the first N watched entries fill them in. (The plan's
-    // simplification: the UI just shows label + raw value.)
-    for (const t of watchTexts) {
-      out.push({ label: `text:${JSON.stringify(t)}`, tokenId: -1, source: 'text' });
-    }
-    for (const raw of watchIds) {
-      const tid = Number.parseInt(raw, 10);
-      if (!Number.isFinite(tid) || seen.has(tid)) continue;
-      seen.add(tid);
-      const piece = tokenCache[tid];
-      const suffix = piece ? ` ${JSON.stringify(piece)}` : '';
-      out.push({ label: `id=${tid}${suffix}`, tokenId: tid, source: 'id' });
-    }
-    if (watchEos) {
-      for (const tid of activeCaps?.eos_token_ids ?? []) {
-        if (seen.has(tid)) continue;
-        seen.add(tid);
-        out.push({ label: `EOS:${tid}`, tokenId: tid, source: 'eos' });
-      }
-    }
-    return out;
-  });
-  /**
-   * Resolve one watch column at a given position by looking it up in
-   * the row's ``watched`` array. For ``text`` columns we use the
-   * positional index trick (text watches always come first in the
-   * server's resolved order). For ``id`` / ``eos`` columns we know
-   * the id and look it up directly.
-   */
-  function watchedAt(step: StepResult, col: WatchColumn, textIdxIfApplicable: number):
-    TokenCandidate | null {
-    if (col.source === 'text') {
-      // Positional: text watches always lead the watched list in the
-      // server's resolved order, so the i-th text column maps to the
-      // i-th watched entry.
-      const w = step.watched[textIdxIfApplicable];
-      return w ? w.candidate : null;
-    }
-    return watchedById(step, col.tokenId);
-  }
+  // Watch column headers are reconstructed client-side from what the
+  // page sent -- see ``lib/generate/watch`` for the resolution-order
+  // contract shared with the server's ``_resolve_watches``.
+  let watchColumns = $derived.by<WatchColumn[]>(() =>
+    buildWatchColumns({
+      watchTexts,
+      watchIds,
+      watchEos,
+      eosTokenIds: activeCaps?.eos_token_ids ?? [],
+      tokenCache
+    })
+  );
 
   let watchTextCount = $derived<number>(watchTexts.length);
 
@@ -1433,30 +1379,73 @@
     <div class="card py-2 px-3">
       <!--
         The prompt composer: an editable field with INLINE token-boundary
-        highlighting plus a model-specific special-token palette. It lives
-        here (right column, above "running completion") so the student sees
-        "what I typed / how it tokenizes" right next to "what the model
-        emits". ``enabled`` gates the highlight + palette on a real local
-        tokenizer; without one it degrades to a plain textarea.
-
-        The run controls (inspect / generate / manual) sit DIRECTLY under
-        the composer -- they used to live at the bottom of the left config
-        card where they got lost far from the input the user is editing.
+        highlighting plus a model-specific special-token palette, placed
+        right column / above "running completion" so "what I typed / how
+        it tokenizes" sits next to "what the model emits". ``enabled``
+        gates highlight + palette on a real local tokenizer (plain
+        textarea otherwise). The run controls sit DIRECTLY under the
+        composer, next to the input being edited.
       -->
-      <TokenComposer
-        bind:value={prompt}
-        backend={backend}
-        model={model}
-        enabled={localTokenizeSupported}
-      />
+      <!--
+        Text | Chat toggle. Text = the historical raw-continuation
+        composer. Chat = the ChatComposer, which renders a structured
+        conversation through the model's own chat template client-side
+        and feeds the SAME prompt pipeline (or messages[] for chat-only
+        simulation backends).
+      -->
+      <div class="mb-2 flex items-center gap-1">
+        <button
+          type="button"
+          class="text-xs px-3 py-1 rounded-l border border-slate-700 {composerMode === 'text'
+            ? 'bg-slate-700/60 text-slate-100'
+            : 'text-slate-400 hover:text-slate-200'}"
+          onclick={() => (composerMode = 'text')}
+          title="Raw text continuation: you type the token stream directly."
+        >Text</button>
+        <button
+          type="button"
+          class="text-xs px-3 py-1 rounded-r border border-slate-700 -ml-px {composerMode === 'chat'
+            ? 'bg-slate-700/60 text-slate-100'
+            : 'text-slate-400 hover:text-slate-200'}"
+          onclick={() => (composerMode = 'chat')}
+          title="Chat mode: compose a conversation and see exactly how the model's chat template turns it into raw text."
+        >Chat</button>
+        {#if composerMode === 'chat' && !chatSimulation}
+          <span class="ml-2 text-[10px] text-slate-500">
+            rendered client-side through the model's template → sent as a raw prompt
+          </span>
+        {/if}
+      </div>
+      {#if composerMode === 'chat'}
+        <ChatComposer
+          bind:this={chatComposer}
+          backend={backend}
+          model={model}
+          simulation={chatSimulation}
+          tokenizeSupported={localTokenizeSupported}
+          loadedModel={backendInfo?.loaded_model ?? null}
+          disabled={busy}
+          bind:prompt={chatPrompt}
+          bind:messages={chatMessages}
+          bind:tools={chatTools}
+          bind:ready={chatReady}
+        />
+      {:else}
+        <TokenComposer
+          bind:value={prompt}
+          backend={backend}
+          model={model}
+          enabled={localTokenizeSupported}
+        />
+      {/if}
       <div class="mt-3 grid grid-cols-3 gap-2">
         <button
           class="btn flex-1 {lastMode === 'inspect' && !busy ? 'btn-primary' : 'btn-ghost'}"
           onclick={runInspect}
-          disabled={busy || !backend || generationDisabled || promptEmpty}
-          title={generationDisabled
-            ? generationDisabledNote
-            : promptEmpty
+          disabled={busy || !backend || runBlocked || (composerMode === 'text' && promptEmpty)}
+          title={runBlocked
+            ? runBlockedNote
+            : composerMode === 'text' && promptEmpty
               ? emptyPromptNote
               : 'Score every prompt position (max_tokens=1 + include_prompt). Same wire path as generate; just stops after one emitted token.'}
         >
@@ -1465,10 +1454,10 @@
         <button
           class="btn flex-1 {lastMode === 'generate' && !busy ? 'btn-primary' : 'btn-ghost'}"
           onclick={runGenerate}
-          disabled={busy || !backend || generationDisabled || promptEmpty}
-          title={generationDisabled
-            ? generationDisabledNote
-            : promptEmpty
+          disabled={busy || !backend || runBlocked || (composerMode === 'text' && promptEmpty)}
+          title={runBlocked
+            ? runBlockedNote
+            : composerMode === 'text' && promptEmpty
               ? emptyPromptNote
               : 'Stream N tokens with the current sampler.'}
         >
@@ -1477,12 +1466,18 @@
         <button
           class="btn flex-1 {manualMode ? 'btn-primary' : 'btn-ghost'}"
           onclick={enterManual}
-          disabled={busy || !backend || generationDisabled || promptEmpty}
-          title={generationDisabled
-            ? generationDisabledNote
-            : promptEmpty
-              ? emptyPromptNote
-              : 'Open the inline picker: pick or force each token by hand. Browser state only; one /generate/stream call per pick (Fireworks reuses KV cache via session_id + prompt_cache_key).'}
+          disabled={busy ||
+            !backend ||
+            runBlocked ||
+            (composerMode === 'text' && promptEmpty) ||
+            (composerMode === 'chat' && chatSimulation)}
+          title={composerMode === 'chat' && chatSimulation
+            ? 'Manual picking needs prefix_token_ids on a raw token stream; chat-only providers render the template server-side, so there is no client-visible token sequence to extend. Use a template-capable backend (Fireworks / local / remote) for manual mode in chat.'
+            : runBlocked
+              ? runBlockedNote
+              : composerMode === 'text' && promptEmpty
+                ? emptyPromptNote
+                : 'Open the inline picker: pick or force each token by hand. Browser state only; one /generate/stream call per pick (Fireworks reuses KV cache via session_id + prompt_cache_key).'}
         >
           {busy && lastMode === 'manual' ? '…' : 'manual'}
         </button>
@@ -1492,14 +1487,21 @@
           <button class="btn btn-ghost text-xs" onclick={cancel}>stop streaming</button>
         </div>
       {/if}
-      {#if promptEmpty && !generationDisabled}
+      {#if composerMode === 'text' && promptEmpty && !generationDisabled}
         <p class="mt-2 text-[11px] text-amber-400 leading-snug">
           {emptyPromptNote}
         </p>
       {/if}
-      {#if generationDisabled}
+      {#if runBlocked}
         <p class="mt-1 text-[11px] text-amber-400 leading-snug">
-          {generationDisabledNote || 'generation disabled for this backend'}
+          {runBlockedNote}
+          {#if composerMode === 'text' && generationDisabled && supportsChatStream}
+            <button
+              type="button"
+              class="ml-1 underline decoration-dotted hover:text-amber-200"
+              onclick={() => (composerMode = 'chat')}
+            >switch to chat mode</button>
+          {/if}
         </p>
       {/if}
       {#if manualMode}
@@ -1521,13 +1523,25 @@
         <div class="flex items-center gap-3">
           <span class="text-xs uppercase tracking-wider text-slate-500">running completion</span>
           {#if completionText.length > 0}
-            <button
-              type="button"
-              class="btn btn-ghost text-[11px] py-0.5 px-2"
-              onclick={moveCompletionToPrompt}
-              disabled={busy}
-              title="Fold the run's prompt + the whole generated continuation into the prompt box, so you can keep generating from exactly what's shown here."
-            >→ move to prompt</button>
+            {#if composerMode === 'chat'}
+              <button
+                type="button"
+                class="btn btn-ghost text-[11px] py-0.5 px-2"
+                onclick={appendCompletionAsAssistant}
+                disabled={busy || !completionAppendable}
+                title={completionAppendable
+                  ? 'Fold the streamed completion into the conversation as an assistant block, so you can add the next user turn and keep the dialogue going.'
+                  : 'Already appended — run another generation to get new tokens to fold in.'}
+              >{completionAppendable ? '→ append as assistant' : '✓ appended'}</button>
+            {:else}
+              <button
+                type="button"
+                class="btn btn-ghost text-[11px] py-0.5 px-2"
+                onclick={moveCompletionToPrompt}
+                disabled={busy}
+                title="Fold the run's prompt + the whole generated continuation into the prompt box, so you can keep generating from exactly what's shown here."
+              >→ move to prompt</button>
+            {/if}
           {/if}
         </div>
         <div class="text-[10px] uppercase tracking-wider text-slate-600 flex items-center gap-2">

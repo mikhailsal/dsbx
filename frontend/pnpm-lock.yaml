@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@huggingface/jinja':
+        specifier: ^0.5.9
+        version: 0.5.9
     devDependencies:
       '@sveltejs/adapter-static':
         specifier: ^3.0.6
@@ -188,6 +192,10 @@ packages:
     engines: {node: '>=12'}
     cpu: [x64]
     os: [win32]
+
+  '@huggingface/jinja@0.5.9':
+    resolution: {integrity: sha512-uWTG+l3VJRsl7EXxYizuL3P+cCPoc3cRqbWWRcQN0FhejRfbdq0RNhCmbY/YDtnTcz9icdLYuLDjsnz4d8JMuw==}
+    engines: {node: '>=18'}
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -1086,6 +1094,8 @@ snapshots:
 
   '@esbuild/win32-x64@0.21.5':
     optional: true
+
+  '@huggingface/jinja@0.5.9': {}
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:

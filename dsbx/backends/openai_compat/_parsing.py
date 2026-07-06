@@ -68,7 +68,26 @@ class _ParsingMixin:
         return candidates_from_logprobs(triples)
 
     def _cands_from_list(self, items: list[dict]) -> list[TokenCandidate]:
-        triples = [(self._intern(i["token"]), i["token"], float(i["logprob"])) for i in items]
+        """Parse a ``[{token, logprob}]`` list (legacy + chat schemas).
+
+        When an item carries a ``token_id`` (the chat simulation path
+        resolves single-token texts through the local HF tokenizer and
+        injects the REAL model id) we use it directly -- and register the
+        surface text so ``piece`` / ``detokenize`` keep working. Items
+        without an id fall back to the synthetic intern space, exactly
+        the historical behaviour for legacy /completions providers.
+        """
+        triples: list[tuple[int, str, float]] = []
+        for i in items:
+            text = str(i["token"])
+            tid_raw = i.get("token_id")
+            if tid_raw is not None:
+                tid = int(tid_raw)
+                if text:
+                    self._id_to_text.setdefault(tid, text)
+            else:
+                tid = self._intern(text)
+            triples.append((tid, text, float(i["logprob"])))
         return candidates_from_logprobs(triples)
 
     def _cands_from_new_logprobs(self, items: list[dict]) -> list[TokenCandidate]:

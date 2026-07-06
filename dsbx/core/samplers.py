@@ -26,6 +26,14 @@ from dataclasses import dataclass, field
 
 from dsbx.core.types import TokenCandidate
 
+# Builtin samplers with a clean, trustworthy /chat/completions analogue.
+# The chat API has no top_k / min_p / typical / mirostat knobs consistent
+# across providers, and silently degrading a sampler would defeat the
+# sandbox's "show the truth" mission. Single source of truth: the chat
+# streaming mixin gates on it, backends surface it to the browser via
+# ``Capabilities.chat_samplers``, and the frontend run buttons read that.
+CHAT_NATIVE_SAMPLERS = frozenset({"greedy", "temperature", "top_p"})
+
 
 @dataclass
 class SamplerContext:

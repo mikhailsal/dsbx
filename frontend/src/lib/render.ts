@@ -25,7 +25,11 @@ export interface TokenSegment {
 }
 
 const SPACE = '\u2423\u200B'; // ␣ + zero-width space
-const NEWLINE = '\u21B5'; // ↵
+// The newline marker keeps the REAL newline after the ``↵`` symbol: every
+// container that renders these segments uses ``white-space: pre-wrap``, so
+// the line visibly breaks exactly where the token says it does instead of
+// template-heavy text collapsing into one endless marker-riddled line.
+const NEWLINE = '\u21B5\n'; // ↵ + actual line break
 const TAB = '\u2192'; // →
 
 export function isSpecialText(text: string): boolean {

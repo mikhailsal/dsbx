@@ -160,7 +160,9 @@ def test_generate_stream_returns_400_for_chat_only_backend() -> None:
     assert r.status_code == 400
     detail = r.json()["detail"].lower()
     assert "chat-only" in detail
-    assert "generation is disabled" in detail
+    # The guard now points the user at the chat-mode escape hatch instead
+    # of a dead end ("disabled until chat-mode UI lands" is history).
+    assert "chat mode" in detail
 
 
 def test_generate_stream_rejects_custom_sampler(client) -> None:
