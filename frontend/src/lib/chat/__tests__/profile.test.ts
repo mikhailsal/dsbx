@@ -134,6 +134,7 @@ describe('detectFamily', () => {
     expect(detectFamily(fixtures.gemma2.template)).toBe('gemma');
     expect(detectFamily(fixtures.mistral.template)).toBe('mistral');
     expect(detectFamily(fixtures.chatml.template)).toBe('chatml');
+    expect(detectFamily(fixtures.deepseek.template)).toBe('deepseek');
     expect(detectFamily('{{ messages }}')).toBe('unknown');
   });
 });

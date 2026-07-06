@@ -61,6 +61,20 @@ function openTurnContentStart(
   return opener && raw.startsWith(opener, turnPos) ? turnPos + opener.length : contentStart;
 }
 
+/** Where a turn with an EMPTY closing marker ends: at the next role
+ * prefix (DeepSeek's ``<｜User｜>text<｜Assistant｜>`` -- nothing closes
+ * the user turn, the next turn's opener delimits it), or -1 for "runs
+ * to the end of the string". */
+function nextRolePrefixAt(raw: string, from: number, entries: RoleEntry[]): number {
+  let at = -1;
+  for (const e of entries) {
+    if (!e.prefix) continue;
+    const i = raw.indexOf(e.prefix, from);
+    if (i !== -1 && (at === -1 || i < at)) at = i;
+  }
+  return at;
+}
+
 function parseFailure(doc: { blocks: ChatBlock[] }, error: ParseError): ParseResult {
   return {
     ok: false,
@@ -173,9 +187,19 @@ export function parseRaw(raw: string, profile: TemplateProfile): ParseResult {
       runOpenStart = -1;
     }
 
-    const suffixAt = entry.suffix ? raw.indexOf(entry.suffix, contentStart) : -1;
+    // A role with an empty suffix (DeepSeek's user turns) is delimited
+    // by the NEXT turn's opener instead of a closing marker of its own.
+    const suffixAt = entry.suffix
+      ? raw.indexOf(entry.suffix, contentStart)
+      : nextRolePrefixAt(raw, contentStart, entries);
     if (suffixAt === -1) {
       const content = raw.slice(contentStart);
+      if (!entry.suffix && entry.role !== 'assistant') {
+        // Nothing left to delimit the turn and the role needs no closing
+        // marker: a LEGITIMATELY closed final turn, not an open one.
+        blocks.push({ kind: KIND_BY_ROLE[entry.role], content });
+        return { ok: true, doc: { blocks, addGenerationPrompt: false }, warnings, error: null };
+      }
       const lastClose = profile.lastAssistantSuffix;
       if (entry.role === 'assistant' && lastClose && content.endsWith(lastClose)) {
         // The FINAL assistant turn, closed with the template's last-turn

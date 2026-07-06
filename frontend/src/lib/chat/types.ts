@@ -80,6 +80,7 @@ export type TemplateFamily =
   | 'harmony'
   | 'gemma'
   | 'mistral'
+  | 'deepseek'
   | 'unknown';
 
 /** The literal text that opens / closes one role's turn. */

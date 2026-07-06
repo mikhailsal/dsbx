@@ -99,6 +99,19 @@ const FAMILIES: Record<Exclude<TemplateFamily, 'unknown'>, FamilySpec> = {
     lastAssistantSuffix: null,
     notes: ['Mistral merges the system prompt into the last user message.']
   },
+  deepseek: {
+    // U+FF5C FULLWIDTH VERTICAL LINE -- unique to DeepSeek's markers.
+    fingerprint: '<\uff5cUser\uff5c>',
+    reasoning: { open: '<think>', close: '</think>' },
+    toolCall: null,
+    assistantSuffix: null,
+    lastAssistantSuffix: null,
+    notes: [
+      'DeepSeek format: user turns have no closing marker (the next turn opener delimits them); ' +
+        'the assistant opener carries </think> in non-thinking mode. ' +
+        'Tool calls use the DSML block convention (edit them as raw assistant text).'
+    ]
+  },
   chatml: {
     fingerprint: '<|im_start|>',
     reasoning: { open: '<think>', close: '</think>' },
