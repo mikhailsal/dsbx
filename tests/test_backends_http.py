@@ -2515,8 +2515,8 @@ def test_stream_native_with_echo_splits_prompt_and_generation(monkeypatch) -> No
 
 def test_stream_native_with_echo_splits_by_text_offset(monkeypatch) -> None:
     """Real Fireworks streams one position per SSE chunk; the split
-    must use ``text_offset`` (or fall back to cumulative length /
-    sampling-signal presence) rather than chunk boundaries.
+    must track per-position prompt coverage rather than chunk
+    boundaries.
 
     The original implementation assumed "first chunk = all echo, rest
     = emit" -- which collapses to "1 echo + N emit" on real Fireworks
@@ -2525,7 +2525,7 @@ def test_stream_native_with_echo_splits_by_text_offset(monkeypatch) -> None:
     only 1 row in the prompt-logits table. This pin reproduces the
     exact wire shape (one entry per chunk, with text_offset, with
     sampling_logprob on emit positions only) so any future drift in
-    the split heuristic fails loudly.
+    the split logic fails loudly.
     """
     from dsbx.core.engine import GenStep
     from dsbx.core.types import StepResult
@@ -2610,15 +2610,20 @@ def test_stream_native_with_echo_splits_by_text_offset(monkeypatch) -> None:
     assert all(g.step_result.chosen.sampling_mask_count == 100 for g in gen_steps)
 
 
-def test_stream_native_with_echo_splits_by_sampling_signal(monkeypatch) -> None:
-    """Fallback split signal: ``sampling_mask_count`` presence.
+def test_stream_native_with_echo_splits_despite_blank_special_offsets(monkeypatch) -> None:
+    """Blank-echoed specials must not shift the echo/emit boundary.
 
-    When the provider omits ``text_offset`` (and the cumulative-text
-    fallback doesn't help because tokens contain weird unicode), we
-    fall back to "first entry that carries a non-null
-    ``sampling_logprob`` / ``sampling_mask_count`` starts the emit
-    block". Pinned here so the secondary signal can't silently
-    regress.
+    The DeepSeek-on-Fireworks regression: the prompt starts with the
+    literal 7-char ``<|bos|>`` (22-char ``<\uff5cbegin\u2581of\u2581sentence\uff5c>``
+    in real life), which the provider echoes back as ``token: ""`` and
+    EXCLUDES from its ``text_offset`` space -- every offset is shifted
+    left by the special's length, and ``sampling_logprob`` is attached
+    to echoed positions too. Trusting ``text_offset >= len(prompt)``
+    therefore flipped to emit-mode one special-length LATE, silently
+    filing the first generated words under prompt echo; the UI's
+    "append as assistant" then folded a completion with its beginning
+    cut off. The prompt-matching classifier must put the boundary at
+    the real first generated token.
     """
     from dsbx.core.engine import GenStep
     from dsbx.core.types import StepResult
@@ -2630,64 +2635,40 @@ def test_stream_native_with_echo_splits_by_sampling_signal(monkeypatch) -> None:
         supports_new_logprobs=True,
         supports_combined_echo_stream=True,
     )
+
+    def _entry(text: str, tid: int, offset: int, *, emit: bool, finish: str | None = None) -> dict:
+        item: dict = {"token": text, "token_id": tid, "logprob": -0.1, "text_offset": offset}
+        # Fireworks attaches sampling_logprob to echo AND emit entries.
+        item["sampling_logprob"] = -0.1
+        if emit:
+            item["sampling_mask_count"] = 50
+        return {"choices": [{"logprobs": {"content": [item]}, "finish_reason": finish}]}
+
+    # Prompt "<|bos|>Hi friend" (16 chars). The provider's offsets live
+    # in a space where the BOS is 0 chars wide: "Hi" at 0, " friend" at
+    # 2, first EMITTED token "!" at 9 -- all below len(prompt).
     chunks = [
-        # Echo entries: NO text_offset, NO sampling_logprob/mask.
-        {
-            "choices": [
-                {
-                    "logprobs": {
-                        "content": [
-                            {
-                                "token": "X",
-                                "token_id": 1,
-                                "logprob": 0.0,
-                                "top_logprobs": [],
-                            }
-                        ]
-                    }
-                }
-            ]
-        },
-        # Emit entry: sampling_mask_count present.
-        {
-            "choices": [
-                {
-                    "logprobs": {
-                        "content": [
-                            {
-                                "token": "Y",
-                                "token_id": 2,
-                                "logprob": -0.1,
-                                "sampling_mask_count": 50,
-                                "top_logprobs": [],
-                            }
-                        ]
-                    },
-                    "finish_reason": "length",
-                }
-            ]
-        },
+        _entry("", 1, 0, emit=False),
+        _entry("Hi", 100, 0, emit=False),
+        _entry(" friend", 200, 2, emit=False),
+        _entry("!", 300, 9, emit=True),
+        _entry(".", 400, 10, emit=True, finish="length"),
     ]
     _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines(chunks))])
-    # Use a prompt whose char length doesn't help split (single ascii
-    # token would make the cumulative-text heuristic fire too early or
-    # too late depending on prompt). A 5-char prompt + 1-char echo
-    # token leaves running_text_len=1<5 after the echo, so the
-    # cumulative-text path would NOT split there -- only the
-    # sampling-signal path puts the boundary in the right place.
     out = list(
         backend.stream_native_with_echo(
-            "12345",
+            "<|bos|>Hi friend",
             sampler_name="greedy",
             sampler_params={},
-            max_tokens=1,
+            max_tokens=2,
             top_k=1,
         )
     )
     step_results = [x for x in out if isinstance(x, StepResult)]
     gen_steps = [x for x in out if isinstance(x, GenStep)]
-    assert [s.chosen.token_id for s in step_results] == [1]
-    assert [g.decision.token_id for g in gen_steps] == [2]
+    assert [s.chosen.token_id for s in step_results] == [1, 100, 200]
+    assert [g.decision.token_id for g in gen_steps] == [300, 400]
+    assert gen_steps[-1].stop_reason == "max_tokens"
 
 
 def test_stream_native_with_echo_marks_unscored_position_zero_as_nan(monkeypatch) -> None:

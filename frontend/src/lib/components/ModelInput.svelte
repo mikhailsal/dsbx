@@ -240,6 +240,7 @@
           id={id}
           placeholder="type to filter… or enter any provider-specific id"
           value={editing ? query : value || ''}
+          title={value || ''}
           onfocus={handleInputFocus}
           oninput={handleInput}
           onkeydown={handleKeyDown}
@@ -375,7 +376,12 @@
     position: absolute;
     top: calc(100% + 0.25rem);
     left: 0;
-    right: 0;
+    /* Long provider ids (accounts/fireworks/models/…) don't fit the
+       narrow sidebar: let the list outgrow the input up to a sane cap,
+       and wrap whatever still doesn't fit (see .combobox-row). */
+    min-width: 100%;
+    width: max-content;
+    max-width: min(34rem, calc(100vw - 3rem));
     z-index: 30;
     max-height: 16rem;
     overflow-y: auto;
@@ -398,9 +404,11 @@
     color: rgb(226 232 240);
     border: 0;
     cursor: pointer;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    /* Never clip a model id: wrap instead (break-all because ids have
+       no spaces to break at). */
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-all;
   }
   .combobox-row.active {
     background: rgb(30 41 59);
