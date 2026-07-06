@@ -37,6 +37,20 @@ interface FamilySpec {
   fingerprint: string;
   reasoning: { open: string; close: string } | null;
   toolCall: { open: string; close: string } | null;
+  /**
+   * Curated mid-conversation assistant end-of-turn, for families whose
+   * template closes the LAST rendered turn differently (Harmony:
+   * ``<|return|>`` at the end vs ``<|end|>`` mid-stream). The derivation
+   * splits "assistant suffix / next-turn prefix" with a common-prefix
+   * comparison against the last-turn render, which degenerates there
+   * (lcp of ``<|end|>...`` and ``<|return|>`` is ``<|``) -- and the
+   * fragment then false-matches inside every other special token,
+   * breaking raw -> blocks parsing entirely.
+   */
+  assistantSuffix: string | null;
+  /** How the FINAL assistant turn is closed when it differs from the
+   * mid-conversation suffix (Harmony's ``<|return|>``). */
+  lastAssistantSuffix: string | null;
   notes: string[];
 }
 
@@ -51,6 +65,8 @@ const FAMILIES: Record<Exclude<TemplateFamily, 'unknown'>, FamilySpec> = {
     fingerprint: '<|start_header_id|>',
     reasoning: null,
     toolCall: null,
+    assistantSuffix: null,
+    lastAssistantSuffix: null,
     notes: [
       'Llama-3 family: tool calls render as JSON (or <|python_tag|> code) inside the assistant turn.'
     ]
@@ -59,27 +75,36 @@ const FAMILIES: Record<Exclude<TemplateFamily, 'unknown'>, FamilySpec> = {
     fingerprint: '<|channel|>',
     reasoning: { open: '<|channel|>analysis<|message|>', close: '<|end|>' },
     toolCall: null,
+    assistantSuffix: '<|end|>',
+    lastAssistantSuffix: '<|return|>',
     notes: [
       'gpt-oss Harmony format: assistant turns are split into channels ' +
-        '(analysis = reasoning, final = the answer, commentary = tool calls).'
+        '(analysis = reasoning, final = the answer, commentary = tool calls). ' +
+        'Mid-conversation turns close with <|end|>; the final answer closes with <|return|>.'
     ]
   },
   gemma: {
     fingerprint: '<start_of_turn>',
     reasoning: null,
     toolCall: null,
+    assistantSuffix: null,
+    lastAssistantSuffix: null,
     notes: ['Gemma renders the assistant role as "model" and rejects system messages.']
   },
   mistral: {
     fingerprint: '[INST]',
     reasoning: null,
     toolCall: { open: '[TOOL_CALLS] ', close: '</s>' },
+    assistantSuffix: null,
+    lastAssistantSuffix: null,
     notes: ['Mistral merges the system prompt into the last user message.']
   },
   chatml: {
     fingerprint: '<|im_start|>',
     reasoning: { open: '<think>', close: '</think>' },
     toolCall: { open: '<tool_call>\n', close: '\n</tool_call>' },
+    assistantSuffix: null,
+    lastAssistantSuffix: null,
     notes: []
   }
 };
@@ -143,6 +168,7 @@ function emptyProfile(family: TemplateFamily, notes: string[]): TemplateProfile 
     generationPrompt: '',
     systemSupported: false,
     complete: false,
+    lastAssistantSuffix: null,
     reasoning: null,
     toolCall: null,
     notes
@@ -170,7 +196,8 @@ function emptyProfile(family: TemplateFamily, notes: string[]): TemplateProfile 
  */
 function deriveCoreMarkers(
   source: string,
-  inputs: TemplateInputs
+  inputs: TemplateInputs,
+  curatedAssistantSuffix: string | null = null
 ): {
   preamble: string;
   user: RoleMarkers;
@@ -202,7 +229,13 @@ function deriveCoreMarkers(
 
   const userSuffix = longestCommonPrefix(gapUA, tailU);
   const assistantPrefix = gapUA.slice(userSuffix.length);
-  const assistantSuffix = longestCommonPrefix(gapAU, tailA);
+  // The lcp split fails when the LAST turn closes differently from a
+  // mid-conversation turn (Harmony: <|return|> vs <|end|> -- lcp is the
+  // degenerate "<|"); the curated family suffix takes precedence.
+  const assistantSuffix =
+    curatedAssistantSuffix && gapAU.startsWith(curatedAssistantSuffix)
+      ? curatedAssistantSuffix
+      : longestCommonPrefix(gapAU, tailA);
   const userPrefix = gapAU.slice(assistantSuffix.length);
   const preamble = head.endsWith(userPrefix)
     ? head.slice(0, head.length - userPrefix.length)
@@ -326,7 +359,7 @@ export function deriveProfile(inputs: TemplateInputs): TemplateProfile {
 
   let core: ReturnType<typeof deriveCoreMarkers>;
   try {
-    core = deriveCoreMarkers(source, inputs);
+    core = deriveCoreMarkers(source, inputs, spec?.assistantSuffix ?? null);
   } catch (e) {
     return emptyProfile(family, [
       `marker derivation failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -347,6 +380,7 @@ export function deriveProfile(inputs: TemplateInputs): TemplateProfile {
     generationPrompt: core.generationPrompt,
     systemSupported: false,
     complete: false,
+    lastAssistantSuffix: spec?.lastAssistantSuffix ?? null,
     reasoning: spec?.reasoning ?? null,
     toolCall: spec?.toolCall ?? null,
     notes: [...(spec?.notes ?? [])]

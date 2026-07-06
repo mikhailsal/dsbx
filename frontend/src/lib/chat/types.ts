@@ -104,6 +104,10 @@ export interface TemplateProfile {
   generationPrompt: string;
   systemSupported: boolean;
   complete: boolean;
+  /** How the template closes the FINAL assistant turn when it differs
+   * from the mid-conversation suffix (Harmony: ``<|return|>`` vs
+   * ``<|end|>``); null for families with one closing. */
+  lastAssistantSuffix: string | null;
   /** In-content reasoning tags (``<think>`` / ``</think>``), if any. */
   reasoning: { open: string; close: string } | null;
   /** In-content tool-call JSON wrapper (``<tool_call>`` style), if any. */

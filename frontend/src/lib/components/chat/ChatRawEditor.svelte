@@ -27,6 +27,9 @@
     disabled?: boolean;
     parseError?: ParseError | null;
     onInput: (value: string) => void;
+    /** Escape hatch shown with the parse error: discard the raw edits
+     * and return to the (still intact) blocks. */
+    onDiscard?: (() => void) | null;
   }
   let {
     value,
@@ -37,7 +40,8 @@
     readonly = false,
     disabled = false,
     parseError = null,
-    onInput
+    onInput,
+    onDiscard = null
   }: Props = $props();
 
   let composer = $state<TokenComposer | null>(null);
@@ -104,6 +108,16 @@
       <div>expected {parseError.expected}</div>
       <div>found <span class="font-mono">{parseError.found}</span></div>
       <div class="text-rose-400/90">{parseError.hint}</div>
+      {#if onDiscard}
+        <div>
+          You can keep editing here (Raw stays fully usable), or
+          <button
+            type="button"
+            class="underline decoration-dotted hover:text-rose-100"
+            onclick={onDiscard}
+          >discard the raw edits and go back to Blocks</button>.
+        </div>
+      {/if}
     </div>
   {/if}
 </div>

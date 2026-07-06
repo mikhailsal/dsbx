@@ -44,6 +44,23 @@ function roleEntries(profile: TemplateProfile): RoleEntry[] {
   return entries.sort((a, b) => b.prefix.length - a.prefix.length);
 }
 
+/** Where the verbatim content of an OPEN assistant run starts: right
+ * after the opener the renderer will prepend when re-rendering it (the
+ * assistant prefix when it heads the generation prompt, else the
+ * generation prompt itself -- mirrors ``prefillMarkers`` + ``renderChat``
+ * so the raw <-> blocks loop stays byte-lossless). */
+function openTurnContentStart(
+  raw: string,
+  turnPos: number,
+  contentStart: number,
+  profile: TemplateProfile
+): number {
+  const prefix = profile.roles.assistant?.prefix ?? '';
+  const opener =
+    prefix && profile.generationPrompt.startsWith(prefix) ? prefix : profile.generationPrompt;
+  return opener && raw.startsWith(opener, turnPos) ? turnPos + opener.length : contentStart;
+}
+
 function parseFailure(doc: { blocks: ChatBlock[] }, error: ParseError): ParseResult {
   return {
     ok: false,
@@ -93,6 +110,18 @@ export function parseRaw(raw: string, profile: TemplateProfile): ParseResult {
   }
 
   const entries = roleEntries(profile);
+  // Tracks a run of CONSECUTIVE assistant-role turns (Harmony renders one
+  // logical turn as several <|start|>assistant messages: analysis, then
+  // final). If such a run ends UNTERMINATED, the whole run is folded back
+  // into one verbatim open block -- split sub-blocks re-render through
+  // the template, which reworks or drops non-final reasoning, so only the
+  // literal text reproduces the mid-turn context. ``runOpenStart`` is
+  // where the open block's content begins: right after the opener the
+  // RENDERER will prepend when it re-renders the open turn (the assistant
+  // prefix, the generation prompt, or -- for always-appended-header
+  // templates -- the matched turn prefix), keeping the loop lossless.
+  let runOpenStart = -1;
+  let runBlockCount = -1;
   while (pos < raw.length) {
     // A bare generation prompt at the very tail means "model, your turn".
     // Checked as an EXACT tail match so it never shadows a real assistant
@@ -135,16 +164,35 @@ export function parseRaw(raw: string, profile: TemplateProfile): ParseResult {
     }
 
     const contentStart = pos + entry.prefix.length;
+    if (entry.role === 'assistant') {
+      if (runOpenStart === -1) {
+        runOpenStart = openTurnContentStart(raw, pos, contentStart, profile);
+        runBlockCount = blocks.length;
+      }
+    } else {
+      runOpenStart = -1;
+    }
+
     const suffixAt = entry.suffix ? raw.indexOf(entry.suffix, contentStart) : -1;
     if (suffixAt === -1) {
-      // Unterminated final turn -- normal when the user is mid-edit or
-      // prefilling. Kept VERBATIM (no reasoning / tool-call splitting):
-      // sub-blocks re-render through the template, which reworks
-      // non-final <think> sections, so only the literal text -- open
-      // tags included -- reproduces the mid-turn context exactly.
       const content = raw.slice(contentStart);
+      const lastClose = profile.lastAssistantSuffix;
+      if (entry.role === 'assistant' && lastClose && content.endsWith(lastClose)) {
+        // The FINAL assistant turn, closed with the template's last-turn
+        // marker (Harmony's <|return|> where mid-stream turns use
+        // <|end|>) -- a CLOSED turn, not a prefill.
+        appendRoleContent(
+          blocks, warnings, profile, 'assistant', content.slice(0, -lastClose.length)
+        );
+        return { ok: true, doc: { blocks, addGenerationPrompt: false }, warnings, error: null };
+      }
+      // Unterminated final turn -- normal when the user is mid-edit or
+      // prefilling. The whole trailing assistant RUN (Harmony: closed
+      // analysis turn + open final turn) folds into ONE verbatim open
+      // block, mid-run markers included.
       if (entry.role === 'assistant') {
-        blocks.push({ kind: 'assistant', content, prefill: true });
+        blocks.length = runBlockCount;
+        blocks.push({ kind: 'assistant', content: raw.slice(runOpenStart), prefill: true });
       } else {
         blocks.push({ kind: KIND_BY_ROLE[entry.role], content });
       }
@@ -203,7 +251,12 @@ export function splitAssistantContent(
       if (before.trim()) blocks.push({ kind: 'assistant', content: before });
       if (closeAt === -1) {
         blocks.push({ kind: 'assistant_reasoning', content: rest.slice(openAt + open.length) });
-        warnings.push(`reasoning section is missing its closing ${JSON.stringify(close)}.`);
+        // No warning when the reasoning close doubles as the turn suffix
+        // (Harmony's <|end|>): the analysis turn is then LEGITIMATELY
+        // closed by the turn marker the caller already consumed.
+        if (close !== profile.roles.assistant?.suffix) {
+          warnings.push(`reasoning section is missing its closing ${JSON.stringify(close)}.`);
+        }
         return;
       }
       blocks.push({
@@ -211,6 +264,12 @@ export function splitAssistantContent(
         content: rest.slice(openAt + open.length, closeAt)
       });
       rest = rest.slice(closeAt + close.length).replace(/^\n+/, '');
+      // Harmony closes the analysis MESSAGE and re-opens the assistant
+      // header for the final channel; inside one logical turn that
+      // header is scaffolding, not content -- drop it so the block holds
+      // just the answer text.
+      const reopen = profile.roles.assistant?.prefix ?? '';
+      if (reopen && rest.startsWith(reopen)) rest = rest.slice(reopen.length);
     }
   }
 

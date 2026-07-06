@@ -21,15 +21,21 @@ import { prefillMarkers } from './profile';
 import type { ChatBlock, ChatDoc, TemplateProfile } from './types';
 
 /** Drop the turn-closing text a finished run leaves at the end of the
- * completion (the EOS/EOT token the model emitted, e.g. ``<|im_end|>``)
- * so it is not doubled when the template closes the turn again. */
+ * completion (the EOS/EOT token the model emitted -- ``<|im_end|>``, or
+ * Harmony's last-turn ``<|return|>``) so it is not doubled when the
+ * template closes the turn again. */
 function stripTurnClose(
   text: string,
   profile: TemplateProfile | null,
   eosToken: string | null
 ): string {
   const suffix = profile?.roles.assistant?.suffix ?? '';
-  const candidates = [suffix, suffix.trimEnd(), eosToken ?? ''].filter(Boolean);
+  const candidates = [
+    suffix,
+    suffix.trimEnd(),
+    profile?.lastAssistantSuffix ?? '',
+    eosToken ?? ''
+  ].filter(Boolean);
   for (const c of candidates) {
     if (text.endsWith(c)) return text.slice(0, -c.length);
   }

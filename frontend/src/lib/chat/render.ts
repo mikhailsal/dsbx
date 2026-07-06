@@ -186,6 +186,12 @@ export function renderChat(
       eos_token: inputs.eosToken ?? ''
     };
     if (tools) context.tools = tools;
+    // Reasoning key differs by family: Qwen/DeepSeek templates read
+    // ``reasoning_content``, gpt-oss Harmony reads ``thinking``. The
+    // template context aliases both; the wire ``messages`` stay clean.
+    context.messages = (context.messages as ChatMessage[]).map((m) =>
+      m.reasoning_content !== undefined ? { ...m, thinking: m.reasoning_content } : m
+    );
     raw = template.render(context);
     if (prefill !== null) raw += usePrefix ? assistantPrefix + prefill : prefill;
   } catch (e) {

@@ -139,11 +139,30 @@
     const result = parseRaw(rawText, profile);
     if (!result.ok) {
       parseError = result.error;
-      return; // stay in raw; the editor shows the positioned error
+      return; // stay in raw; the editor shows the positioned error + escape
     }
     doc = result.doc;
     parseError = null;
     parseWarnings = result.warnings;
+    subMode = 'blocks';
+  }
+
+  /** Escape hatch from an unparseable raw edit: drop the raw text and
+   * return to the blocks that produced it (they are still intact). */
+  function discardRawEdits(): void {
+    rawText = rendered?.raw ?? '';
+    parseError = null;
+    parseWarnings = [];
+    subMode = 'blocks';
+  }
+
+  /** Nuke the whole conversation back to a fresh user turn. */
+  function resetConversation(): void {
+    if (!window.confirm('Reset the conversation? All blocks and raw edits are discarded.')) return;
+    doc = { blocks: [{ kind: 'user', content: '' }], addGenerationPrompt: true };
+    rawText = '';
+    parseError = null;
+    parseWarnings = [];
     subMode = 'blocks';
   }
 
@@ -228,6 +247,13 @@
           title={profile.notes.join(' ')}
         >template markers not fully derivable — blocks are the source of truth</span>
       {/if}
+      <button
+        type="button"
+        class="ml-auto text-[11px] px-2 py-0.5 rounded border border-slate-700 text-slate-400 hover:border-rose-600 hover:text-rose-300"
+        onclick={resetConversation}
+        {disabled}
+        title="Discard all blocks and raw edits and start over with an empty user turn."
+      >reset</button>
     </div>
 
     {#if subMode === 'blocks'}
@@ -261,6 +287,7 @@
           rawText = v;
           parseError = null;
         }}
+        onDiscard={discardRawEdits}
       />
     {/if}
 
